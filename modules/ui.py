@@ -75,7 +75,7 @@ from modules.utilities import (
 )
 from modules import imread_unicode
 from modules.video_capture import VideoCapturer
-from modules.window_capture import WindowCapturer, run_portal_session
+from modules.window_capture import WindowCapturer, PortalSession
 
 if platform.system() == "Windows":
     from pygrabber.dshow_graph import FilterGraph
@@ -959,31 +959,26 @@ class MainWindow(QMainWindow):
                 update_status("Please select a source image first")
                 return
         update_status("Opening window picker...")
-        self._portal_worker = _PortalWorker()
-        self._portal_worker.finished.connect(self._on_portal_finished)
-        self._portal_worker.error.connect(
-            lambda msg: update_status(f"Window capture error: {msg}")
-        )
-        self._portal_worker.start()
 
-    def _on_portal_finished(self, result) -> None:
-        if result is None:
-            # Error message already shown via error signal, or user cancelled
-            if self._portal_worker and not self._portal_worker.isRunning():
-                return  # error already displayed
-            update_status("Window capture cancelled.")
-            return
-        fd, node_id = result
-        if not modules.globals.map_faces:
-            from modules.face_analyser import get_face_analyser
-            from modules.processors.frame.face_swapper import get_face_swapper
-            get_face_analyser()
-            get_face_swapper()
-            _open_window_preview(fd, node_id)
-        else:
-            modules.globals.source_target_map = []
-            _open_window_live_mapper_dialog(fd, node_id,
-                                            modules.globals.source_target_map)
+        def on_done(fd, node_id):
+            update_status(f"Window selected, starting capture...")
+            if not modules.globals.map_faces:
+                from modules.face_analyser import get_face_analyser
+                from modules.processors.frame.face_swapper import get_face_swapper
+                get_face_analyser()
+                get_face_swapper()
+                _open_window_preview(fd, node_id)
+            else:
+                modules.globals.source_target_map = []
+                _open_window_live_mapper_dialog(
+                    fd, node_id, modules.globals.source_target_map,
+                )
+
+        def on_error(msg):
+            update_status(f"Window capture error: {msg}")
+
+        self._portal_session = PortalSession()
+        self._portal_session.start(on_done, on_error)
 
     def closeEvent(self, event):
         # Treat OS-level close as Destroy click
@@ -1054,22 +1049,6 @@ class PreviewWindow(QWidget):
 
 
 # ─── webcam preview window ───────────────────────────────────────────────
-
-
-class _PortalWorker(QThread):
-    """Runs the xdg-desktop-portal window-picker dialog in a background thread
-    so the Qt event loop stays responsive while the user picks a window."""
-
-    finished = Signal(object)  # (fd, node_id) or None
-    error = Signal(str)        # error message
-
-    def run(self) -> None:
-        try:
-            result = run_portal_session()
-            self.finished.emit(result)
-        except Exception as e:
-            self.error.emit(str(e))
-            self.finished.emit(None)
 
 
 class _CaptureWorker(QThread):

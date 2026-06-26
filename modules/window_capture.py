@@ -3,17 +3,13 @@
 Provides WindowCapturer with the same start/read/release interface as
 VideoCapturer, so it can be used as a drop-in replacement in the live
 preview pipeline.
-
-The portal session (which shows the system window-picker dialog) must be
-started in a background thread so it doesn't block the Qt event loop.
-The GStreamer pipeline is then created on the caller's thread.
 """
 
 from __future__ import annotations
 
 import os
 import uuid
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -57,109 +53,157 @@ def _extract_handle_token(params: GLib.Variant) -> Optional[str]:
     return None
 
 
-def _portal_call(
-    conn: Gio.DBusConnection,
-    method: str,
-    params: GLib.Variant,
-    need_fd: bool = False,
-) -> Tuple[dict, Optional[Gio.UnixFDList]]:
-    """Call a portal method and wait for its Response signal.
+class _PortalCaller:
+    """Non-blocking portal D-Bus caller designed to run on the Qt main thread.
 
-    Uses conn.call_sync() for the D-Bus call (fast, non-blocking for the
-    portal UI) and GLib.MainLoop.run() to dispatch the Response signal.
-    Must be called from a thread where the GLib default main context is
-    available (i.e. any thread — it's thread-safe).
+    Uses Gio.DBusConnection.call() (async) so the GLib default main context
+    stays responsive — both the portal dialog (rendered by GNOME Shell) and
+    Qt events are processed while we wait for each Response signal.
     """
-    handle_token = _extract_handle_token(params)
-    if handle_token is None:
-        raise RuntimeError(f"{method}: no handle_token in parameters")
-
-    req_path = _request_path(conn, handle_token)
-
-    state = {"done": False, "result": -1, "details": {}, "fd_list": None}
-    loop = GLib.MainLoop()
-
-    def on_response(_c, _s, _o, _i, _sig, resp_params):
-        state["result"] = resp_params[0]
-        d = resp_params[1] if len(resp_params) > 1 else {}
-        state["details"] = {k: d[k] for k in d.keys()}
-        state["done"] = True
-        loop.quit()
-
-    # Subscribe BEFORE calling so we never miss the signal.
-    sub_id = conn.signal_subscribe(
-        None,
-        "org.freedesktop.portal.Request",
-        "Response",
-        req_path,
-        None,
-        Gio.DBusSignalFlags.NONE,
-        on_response,
-    )
-
-    try:
-        # call_sync is fast — the D-Bus method reply comes back in <1ms.
-        # The portal UI (window picker) is rendered by GNOME Shell, not us.
-        if need_fd:
-            _, fd_list = conn.call_with_unix_fd_list_sync(
-                _PORTAL_BUS_NAME,
-                _PORTAL_OBJECT_PATH,
-                _PORTAL_IFACE,
-                method,
-                params,
-                None,
-                Gio.DBusCallFlags.NONE,
-                -1,
-                None,
-                None,
-            )
-            state["fd_list"] = fd_list
-        else:
-            conn.call_sync(
-                _PORTAL_BUS_NAME,
-                _PORTAL_OBJECT_PATH,
-                _PORTAL_IFACE,
-                method,
-                params,
-                None,
-                Gio.DBusCallFlags.NONE,
-                -1,
-                None,
-            )
-
-        # Run the GLib main loop to dispatch the Response signal.
-        GLib.timeout_add(120_000, lambda: loop.quit() or False)
-        loop.run()
-
-        if not state["done"]:
-            raise TimeoutError(
-                f"Portal {method} timed out — user didn't respond?"
-            )
-        if state["result"] != 0:
-            raise RuntimeError(
-                f"Portal {method} failed with code {state['result']}"
-            )
-        return state["details"], state["fd_list"]
-
-    finally:
-        conn.signal_unsubscribe(sub_id)
-
-
-class _ScreenCastPortal:
-    """Manages an xdg-desktop-portal ScreenCast session via GDBus."""
 
     def __init__(self):
-        if not _HAS_GST:
-            raise RuntimeError("GStreamer (gi.repository.Gst) is not available")
         self._conn: Gio.DBusConnection = Gio.bus_get_sync(
             Gio.BusType.SESSION, None
         )
         self._escaped = (
             self._conn.get_unique_name().replace(".", "_").lstrip(":")
         )
-        self._session_handle: Optional[str] = None
+        self._sub_id: Optional[int] = None
+        self._timeout_id: Optional[int] = None
 
-    def create_session(self) -> None:
+    def call(
+        self,
+        method: str,
+        params: GLib.Variant,
+        callback: Callable[[dict, Optional[Gio.UnixFDList]], None],
+        need_fd: bool = False,
+    ) -> None:
+        """Call a portal method asynchronously.  ``callback(details, fd_list)``
+        is invoked on the Qt main thread when the Response signal arrives."""
+        handle_token = _extract_handle_token(params)
+        if handle_token is None:
+            raise RuntimeError(f"{method}: no handle_token in parameters")
+
+        req_path = _request_path(self._conn, handle_token)
+
+        def on_response(_c, _s, _o, _i, _sig, resp_params):
+            self._cleanup()
+            result = resp_params[0]
+            raw_details = resp_params[1] if len(resp_params) > 1 else {}
+            details = {k: raw_details[k] for k in raw_details.keys()}
+            if result != 0:
+                raise RuntimeError(f"Portal {method} failed: {result}")
+            callback(details, self._pending_fd_list)
+
+        self._sub_id = self._conn.signal_subscribe(
+            None,
+            "org.freedesktop.portal.Request",
+            "Response",
+            req_path,
+            None,
+            Gio.DBusSignalFlags.NONE,
+            on_response,
+        )
+
+        self._pending_fd_list: Optional[Gio.UnixFDList] = None
+
+        def on_reply(conn, result, _user_data):
+            try:
+                if need_fd:
+                    _, self._pending_fd_list = (
+                        conn.call_with_unix_fd_list_finish(result)
+                    )
+                else:
+                    conn.call_finish(result)
+            except Exception as e:
+                self._cleanup()
+                raise RuntimeError(f"Portal {method} D-Bus error: {e}")
+            # fd_list stored; now wait for Response signal.
+            # Set a 120s timeout for user interaction.
+            self._timeout_id = GLib.timeout_add(
+                120_000, self._on_timeout,
+            )
+
+        if need_fd:
+            self._conn.call_with_unix_fd_list(
+                _PORTAL_BUS_NAME,
+                _PORTAL_OBJECT_PATH,
+                _PORTAL_IFACE,
+                method,
+                params,
+                None,
+                Gio.DBusCallFlags.NONE,
+                -1,
+                None,
+                on_reply,
+                None,
+            )
+        else:
+            self._conn.call(
+                _PORTAL_BUS_NAME,
+                _PORTAL_OBJECT_PATH,
+                _PORTAL_IFACE,
+                method,
+                params,
+                None,
+                Gio.DBusCallFlags.NONE,
+                -1,
+                None,
+                on_reply,
+                None,
+            )
+
+    def _on_timeout(self) -> bool:
+        self._cleanup()
+        return False
+
+    def _cleanup(self) -> None:
+        if self._sub_id is not None:
+            self._conn.signal_unsubscribe(self._sub_id)
+            self._sub_id = None
+        if self._timeout_id is not None:
+            GLib.source_remove(self._timeout_id)
+            self._timeout_id = None
+
+
+class PortalSession:
+    """Runs the full CreateSession → SelectSources → Start flow
+    non-blockingly on the Qt main thread.
+
+    Usage::
+
+        def on_done(fd, node_id):
+            # start GStreamer pipeline with fd, node_id
+            ...
+
+        def on_error(msg):
+            # show error to user
+            ...
+
+        session = PortalSession()
+        session.start(on_done, on_error)
+    """
+
+    def __init__(self):
+        self._caller = _PortalCaller()
+        self._escaped = self._caller._escaped
+        self._session_handle: Optional[str] = None
+        self._on_done: Optional[Callable] = None
+        self._on_error: Optional[Callable] = None
+
+    def start(
+        self,
+        on_done: Callable[[int, int], None],
+        on_error: Callable[[str], None],
+    ) -> None:
+        self._on_done = on_done
+        self._on_error = on_error
+        try:
+            self._create_session()
+        except Exception as e:
+            on_error(str(e))
+
+    def _create_session(self) -> None:
         session_token = _token()
         params = GLib.Variant(
             "(a{sv})",
@@ -169,15 +213,19 @@ class _ScreenCastPortal:
                 "app_id": GLib.Variant("s", "deep-live-cam"),
             },),
         )
-        _portal_call(self._conn, "CreateSession", params)
         self._session_handle = (
             f"{_PORTAL_OBJECT_PATH}/session/"
             f"{self._escaped}/{session_token}"
         )
+        self._caller.call("CreateSession", params, self._on_session_created)
 
-    def select_sources(self) -> None:
-        if self._session_handle is None:
-            raise RuntimeError("No session created")
+    def _on_session_created(self, details: dict, _fd_list) -> None:
+        try:
+            self._select_sources()
+        except Exception as e:
+            self._on_error(str(e))
+
+    def _select_sources(self) -> None:
         params = GLib.Variant(
             "(oa{sv})",
             (self._session_handle, {
@@ -187,74 +235,102 @@ class _ScreenCastPortal:
                 "cursor_mode": GLib.Variant("u", 2),  # embedded
             }),
         )
-        _portal_call(self._conn, "SelectSources", params)
+        self._caller.call(
+            "SelectSources", params, self._on_sources_selected,
+        )
 
-    def start(self) -> Tuple[int, int]:
-        """Start the session. Returns (pipe_wire_fd, node_id)."""
-        if self._session_handle is None:
-            raise RuntimeError("No session created")
+    def _on_sources_selected(self, details: dict, _fd_list) -> None:
+        try:
+            self._start()
+        except Exception as e:
+            self._on_error(str(e))
+
+    def _start(self) -> None:
         params = GLib.Variant(
             "(osa{sv})",
             (self._session_handle, "", {
                 "handle_token": GLib.Variant("s", _token()),
             }),
         )
-        details, fd_list = _portal_call(
-            self._conn, "Start", params, need_fd=True,
+        self._caller.call(
+            "Start", params, self._on_started, need_fd=True,
         )
 
-        streams = details.get("streams")
-        if streams is None:
-            raise RuntimeError("No streams returned — no window selected?")
+    def _on_started(self, details: dict, fd_list) -> None:
+        try:
+            streams = details.get("streams")
+            if streams is None:
+                self._on_error("No window selected")
+                return
 
-        node_id = int(streams[0][0])
-        fd = fd_list.get(0) if fd_list else -1
-        if fd < 0:
-            raise RuntimeError("Invalid PipeWire fd")
+            node_id = int(streams[0][0])
+            fd = fd_list.get(0) if fd_list else -1
+            if fd < 0:
+                self._on_error("Invalid PipeWire fd")
+                return
 
-        return fd, node_id
+            self._on_done(fd, node_id)
+        except Exception as e:
+            self._on_error(str(e))
 
 
-# ─── public API ──────────────────────────────────────────────────────────
+# ─── synchronous wrapper (for background threads) ───────────────────────
 
 
 def run_portal_session() -> Optional[Tuple[int, int]]:
-    """Run the portal dialog and return (fd, node_id) on success.
+    """Synchronous portal session — for use in background threads.
 
-    This function BLOCKS while the system window-picker dialog is shown.
-    Call it from a background thread so the Qt event loop stays responsive.
-    Returns None if the user cancels or an error occurs.
+    Runs the GLib main loop on the calling thread until the portal flow
+    completes. Returns (fd, node_id) or None on failure.
     """
+    if os.environ.get("XDG_SESSION_TYPE") != "wayland":
+        print("Window capture requires a Wayland session.")
+        return None
+    if not _HAS_GST:
+        print("GStreamer is not available.")
+        return None
+
+    result = {}
+    loop = GLib.MainLoop()
+
+    def on_done(fd, node_id):
+        result["fd"] = fd
+        result["node_id"] = node_id
+        loop.quit()
+
+    def on_error(msg):
+        result["error"] = msg
+        loop.quit()
+
+    # Use GLib.idle_add to kick off the portal flow on the default context.
+    GLib.idle_add(lambda: _run_portal_inline(on_done, on_error) or False)
+
+    GLib.timeout_add(120_000, lambda: loop.quit() or False)
+    loop.run()
+
+    if "error" in result:
+        print(f"Portal error: {result['error']}")
+        return None
+    if "fd" in result:
+        return result["fd"], result["node_id"]
+    return None
+
+
+def _run_portal_inline(on_done, on_error):
+    """Run the portal flow inline (called from GLib.idle_add)."""
     try:
-        if os.environ.get("XDG_SESSION_TYPE") != "wayland":
-            print("Window capture requires a Wayland session.")
-            return None
-        if not _HAS_GST:
-            print("GStreamer (gi.repository.Gst) is not available.")
-            return None
-        portal = _ScreenCastPortal()
-        portal.create_session()
-        portal.select_sources()
-        fd, node_id = portal.start()
-        return fd, node_id
-    except TimeoutError as e:
-        print(f"Window capture: {e}")
-        return None
+        session = PortalSession()
+        session.start(on_done, on_error)
     except Exception as e:
-        print(f"Portal session error: {e}")
-        return None
+        on_error(str(e))
+    return False  # don't repeat
+
+
+# ─── WindowCapturer ─────────────────────────────────────────────────────
 
 
 class WindowCapturer:
-    """Captures a window via PipeWire + GStreamer.
-
-    Typical usage (from the UI):
-        1. In a background thread: call run_portal_session() to show the
-           system window picker and get (fd, node_id).
-        2. On the main thread: create WindowCapturer() and call
-           start_with_fd(fd, node_id) to begin capturing.
-        3. Use read() / release() as with VideoCapturer.
-    """
+    """Captures a window via PipeWire + GStreamer."""
 
     def __init__(self):
         self._pipeline: Optional[Gst.Pipeline] = None
@@ -266,7 +342,6 @@ class WindowCapturer:
         self.frame_callback = None
 
     def start_with_fd(self, fd: int, node_id: int, fps: int = 30) -> bool:
-        """Build and start the GStreamer pipeline from a PipeWire fd."""
         if not _HAS_GST:
             return False
         try:
@@ -311,11 +386,9 @@ class WindowCapturer:
             self.release()
             return False
 
-    # ── VideoCapturer-compatible interface ─────────────────────────────
-
     def start(self, width: int = 0, height: int = 0, fps: int = 30) -> bool:
         raise NotImplementedError(
-            "Use run_portal_session() + start_with_fd() instead"
+            "Use PortalSession + start_with_fd() instead"
         )
 
     def read(self) -> Tuple[bool, Optional[np.ndarray]]:
