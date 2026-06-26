@@ -960,11 +960,13 @@ class MainWindow(QMainWindow):
                 update_status("Please select a source image first")
                 return
 
-        # Show window picker dialog
         windows = list_windows()
         if not windows:
             update_status("No capturable windows found.")
             return
+
+        # Store selected hwnd from the dialog
+        self._selected_hwnd = None
 
         dialog = QDialog(self)
         dialog.setWindowTitle(_("Select a Window"))
@@ -983,8 +985,10 @@ class MainWindow(QMainWindow):
         btn_refresh.setObjectName("secondary")
 
         def refresh():
+            nonlocal windows
+            windows = list_windows()
             list_widget.clear()
-            for w in list_windows():
+            for w in windows:
                 list_widget.addItem(f"{w['title']}  ({w['width']}x{w['height']})")
 
         btn_refresh.clicked.connect(refresh)
@@ -997,23 +1001,29 @@ class MainWindow(QMainWindow):
             idx = list_widget.currentRow()
             if idx < 0 or idx >= len(windows):
                 return
-            hwnd = windows[idx]["hwnd"]
+            self._selected_hwnd = windows[idx]["hwnd"]
             dialog.accept()
-            if not modules.globals.map_faces:
-                from modules.face_analyser import get_face_analyser
-                from modules.processors.frame.face_swapper import get_face_swapper
-                get_face_analyser()
-                get_face_swapper()
-                _open_window_preview(hwnd)
-            else:
-                modules.globals.source_target_map = []
-                _open_window_live_mapper_dialog(
-                    hwnd, modules.globals.source_target_map,
-                )
 
         btn_ok.clicked.connect(on_accept)
         list_widget.doubleClicked.connect(on_accept)
         dialog.exec()
+
+        # After dialog closes, start capture with selected window
+        hwnd = self._selected_hwnd
+        if hwnd is None:
+            return
+
+        if not modules.globals.map_faces:
+            from modules.face_analyser import get_face_analyser
+            from modules.processors.frame.face_swapper import get_face_swapper
+            get_face_analyser()
+            get_face_swapper()
+            _open_window_preview(hwnd)
+        else:
+            modules.globals.source_target_map = []
+            _open_window_live_mapper_dialog(
+                hwnd, modules.globals.source_target_map,
+            )
 
     def closeEvent(self, event):
         # Treat OS-level close as Destroy click
