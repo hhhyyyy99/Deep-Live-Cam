@@ -971,6 +971,17 @@ class MainWindow(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle(_("Select a Window"))
         dialog.setMinimumSize(500, 400)
+        dialog.setStyleSheet("""
+            QDialog { background-color: #1e1e1e; color: #e6e6e6; }
+            QLabel { color: #e6e6e6; }
+            QListWidget {
+                background-color: #2a2a2a; color: #e6e6e6;
+                border: 1px solid #404040; border-radius: 6px;
+                font-size: 11pt;
+            }
+            QListWidget::item:selected { background-color: #2d6cdf; }
+            QListWidget::item:hover { background-color: #3a3a3a; }
+        """)
         layout = QVBoxLayout(dialog)
 
         layout.addWidget(QLabel(_("Select a window to capture:")))
