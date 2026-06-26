@@ -85,17 +85,18 @@ class _ScreenCastPortal:
     ) -> Optional[Tuple[GLib.Variant, Optional[Gio.UnixFDList]]]:
         """Call a portal method and block until its Response signal arrives.
 
-        Must be called from a thread that runs a GLib main loop.
+        Uses the async GDBus ``call()`` API so the GLib default main context
+        keeps dispatching events (including the portal's UI rendering) while
+        we wait for the Response signal on a background thread.
         """
-        # Extract handle_token from the variant so we know the request path.
         handle_token = self._extract_handle_token(parameters)
         if handle_token is None:
             raise RuntimeError(f"{method}: no handle_token in parameters")
 
         req_path = self._request_path(handle_token)
 
-        # State shared with the signal callback
-        state = {"done": False, "result": -1, "details": {}}
+        # Shared state between callbacks
+        state = {"done": False, "result": -1, "details": {}, "fd_list": None}
         loop = GLib.MainLoop()
 
         def on_response(_conn, _sender, _path, _iface, _sig, params):
@@ -105,7 +106,6 @@ class _ScreenCastPortal:
             state["done"] = True
             loop.quit()
 
-        # Subscribe BEFORE calling so we never miss the signal.
         sub_id = self._conn.signal_subscribe(
             None,
             "org.freedesktop.portal.Request",
@@ -117,8 +117,23 @@ class _ScreenCastPortal:
         )
 
         try:
+            # Use async call() so the GLib main context keeps running
+            # (required for the portal's window-picker UI to render).
+            def on_reply(conn, result, _user_data):
+                try:
+                    if need_fd:
+                        reply, fd_list = conn.call_with_unix_fd_list_finish(result)
+                        state["fd_list"] = fd_list
+                    else:
+                        conn.call_finish(result)
+                except Exception as e:
+                    state["done"] = True
+                    state["result"] = -2
+                    state["details"] = {"error": str(e)}
+                    loop.quit()
+
             if need_fd:
-                _result, out_fd_list = self._conn.call_with_unix_fd_list_sync(
+                self._conn.call_with_unix_fd_list(
                     _PORTAL_BUS_NAME,
                     _PORTAL_OBJECT_PATH,
                     _PORTAL_IFACE,
@@ -128,10 +143,11 @@ class _ScreenCastPortal:
                     Gio.DBusCallFlags.NONE,
                     -1,
                     None,
+                    on_reply,
                     None,
                 )
             else:
-                self._conn.call_sync(
+                self._conn.call(
                     _PORTAL_BUS_NAME,
                     _PORTAL_OBJECT_PATH,
                     _PORTAL_IFACE,
@@ -141,10 +157,13 @@ class _ScreenCastPortal:
                     Gio.DBusCallFlags.NONE,
                     -1,
                     None,
+                    on_reply,
+                    None,
                 )
-                out_fd_list = None
 
-            # Run GLib main loop until the Response signal arrives.
+            # Run the GLib main loop — this dispatches both the D-Bus reply
+            # callback AND the Response signal, and also processes portal UI
+            # events (window picker dialog rendering).
             GLib.timeout_add(120_000, lambda: loop.quit() or False)
             loop.run()
 
@@ -152,11 +171,16 @@ class _ScreenCastPortal:
                 raise TimeoutError(
                     f"Portal {method} timed out — user didn't respond?"
                 )
+            if state["result"] == -2:
+                raise RuntimeError(
+                    f"Portal {method} D-Bus error: "
+                    f"{state['details'].get('error', 'unknown')}"
+                )
             if state["result"] != 0:
                 raise RuntimeError(
                     f"Portal {method} failed with code {state['result']}"
                 )
-            return None, out_fd_list
+            return state["details"], state["fd_list"]
 
         finally:
             self._conn.signal_unsubscribe(sub_id)
@@ -190,7 +214,6 @@ class _ScreenCastPortal:
             },),
         )
         self._call_portal("CreateSession", params)
-
         self._session_handle = (
             f"{_PORTAL_OBJECT_PATH}/session/"
             f"{self._escaped_sender}/{session_token}"
@@ -211,8 +234,8 @@ class _ScreenCastPortal:
         )
         self._call_portal("SelectSources", params)
 
-    def start(self) -> Tuple[int, int]:
-        """Start the session.  Returns (pipe_wire_fd, node_id)."""
+    def start_and_get_stream(self) -> Tuple[int, int]:
+        """Start and return (fd, node_id) from the portal response."""
         if self._session_handle is None:
             raise RuntimeError("No session created")
         handle_token = _token()
@@ -222,85 +245,20 @@ class _ScreenCastPortal:
                 "handle_token": GLib.Variant("s", handle_token),
             }),
         )
-        _, out_fd_list = self._call_portal("Start", params, need_fd=True)
+        details, fd_list = self._call_portal("Start", params, need_fd=True)
 
-        # The Response signal details contain 'streams'.
-        # Re-read from the last _call_portal state via a fresh signal.
-        # Actually we stored details in state but returned them differently.
-        # Let's refactor to return details too.
-        raise NotImplementedError("See run_portal_session()")
+        streams = details.get("streams")
+        if streams is None:
+            raise RuntimeError("No streams returned — no window selected?")
 
-    def start_and_get_stream(self) -> Tuple[int, int]:
-        """Start and return (fd, node_id) from the portal response."""
-        if self._session_handle is None:
-            raise RuntimeError("No session created")
-        handle_token = _token()
+        node_id = int(streams[0][0])
+        fd = fd_list.get(0) if fd_list else -1
+        if fd < 0:
+            raise RuntimeError("Invalid PipeWire fd")
 
-        state = {"done": False, "result": -1, "details": {}}
-        loop = GLib.MainLoop()
-
-        req_path = self._request_path(handle_token)
-
-        def on_response(_c, _s, _o, _i, _sig, params):
-            state["result"] = params[0]
-            d = params[1] if len(params) > 1 else {}
-            state["details"] = {k: d[k] for k in d.keys()}
-            state["done"] = True
-            loop.quit()
-
-        sub_id = self._conn.signal_subscribe(
-            None,
-            "org.freedesktop.portal.Request",
-            "Response",
-            req_path,
-            None,
-            Gio.DBusSignalFlags.NONE,
-            on_response,
-        )
-
-        try:
-            params = GLib.Variant(
-                "(osa{sv})",
-                (self._session_handle, "", {
-                    "handle_token": GLib.Variant("s", handle_token),
-                }),
-            )
-            _, out_fd_list = self._conn.call_with_unix_fd_list_sync(
-                _PORTAL_BUS_NAME,
-                _PORTAL_OBJECT_PATH,
-                _PORTAL_IFACE,
-                "Start",
-                params,
-                None,
-                Gio.DBusCallFlags.NONE,
-                -1,
-                None,
-                None,
-            )
-
-            GLib.timeout_add(120_000, lambda: loop.quit() or False)
-            loop.run()
-
-            if not state["done"]:
-                raise TimeoutError("Portal Start timed out")
-            if state["result"] != 0:
-                raise RuntimeError(f"Portal Start failed: {state['result']}")
-
-            streams = state["details"].get("streams")
-            if streams is None:
-                raise RuntimeError("No streams returned — no window selected?")
-
-            node_id = int(streams[0][0])
-            fd = out_fd_list.get(0) if out_fd_list else -1
-            if fd < 0:
-                raise RuntimeError("Invalid PipeWire fd")
-
-            self._fd = fd
-            self._node_id = node_id
-            return fd, node_id
-
-        finally:
-            self._conn.signal_unsubscribe(sub_id)
+        self._fd = fd
+        self._node_id = node_id
+        return fd, node_id
 
 
 # ─── public API ──────────────────────────────────────────────────────────
