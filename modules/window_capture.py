@@ -39,8 +39,10 @@ _PORTAL_IFACE = "org.freedesktop.portal.ScreenCast"
 class _ScreenCastPortal:
     """Manages an xdg-desktop-portal ScreenCast session via GDBus.
 
-    Uses Gio.DBusConnection.call_with_unix_fd_list_sync for the Start call
-    so that the PipeWire file descriptor is properly received.
+    The portal API uses two distinct tokens:
+    - ``handle_token``  – for the Request object path (Response signal routing).
+    - ``session_handle_token`` – for the Session object path
+      (CreateSession only).
     """
 
     def __init__(self):
@@ -59,7 +61,9 @@ class _ScreenCastPortal:
 
     @staticmethod
     def _token() -> str:
-        return "dlc_" + uuid.uuid4().hex[:12]
+        return "dlc" + uuid.uuid4().hex[:8]
+
+    # ── D-Bus helpers ──────────────────────────────────────────────────
 
     def _on_response(
         self, connection, sender_name, object_path,
@@ -75,7 +79,7 @@ class _ScreenCastPortal:
         if self._loop is not None:
             self._loop.quit()
 
-    def _compute_request_path(self, handle_token: str) -> str:
+    def _request_path(self, handle_token: str) -> str:
         escaped = self._conn.get_unique_name().replace(".", "_").lstrip(":")
         return f"{_PORTAL_OBJECT_PATH}/request/{escaped}_{handle_token}"
 
@@ -85,17 +89,31 @@ class _ScreenCastPortal:
         parameters: GLib.Variant,
         need_fd: bool = False,
     ) -> Optional[Tuple[GLib.Variant, Optional[Gio.UnixFDList]]]:
-        handle_token = self._token()
+        """Call a portal method and wait for its Response signal."""
         self._response_received = False
         self._response_result = -1
         self._response_details = {}
 
-        request_path = self._compute_request_path(handle_token)
+        # Extract handle_token from the parameters to know where to listen.
+        params_tuple = parameters
+        inner = params_tuple.get_child_value(0)
+        handle_token = None
+        for i in range(inner.n_children()):
+            entry = inner.get_child_value(i)
+            key = entry.get_child_value(0).get_string()
+            if key == "handle_token":
+                handle_token = entry.get_child_value(1).get_variant().get_string()
+                break
+
+        if handle_token is None:
+            raise RuntimeError(f"{method}: no handle_token in parameters")
+
+        req_path = self._request_path(handle_token)
         sub_id = self._conn.signal_subscribe(
             None,
             "org.freedesktop.portal.Request",
             "Response",
-            request_path,
+            req_path,
             None,
             Gio.DBusSignalFlags.NONE,
             self._on_response,
@@ -129,7 +147,7 @@ class _ScreenCastPortal:
                 )
                 out_fd_list = None
 
-            # Run GLib main loop so the portal's Response signal is dispatched.
+            # Run GLib main loop until the Response signal arrives.
             self._loop = GLib.MainLoop()
             timeout_id = GLib.timeout_add(120_000, self._on_timeout)
             self._loop.run()
@@ -154,28 +172,33 @@ class _ScreenCastPortal:
             self._loop.quit()
         return False
 
+    # ── Portal API methods ─────────────────────────────────────────────
+
     def create_session(self) -> None:
-        token = self._token()
+        session_token = self._token()
+        handle_token = self._token()
         params = GLib.Variant(
             "(a{sv})",
-            ({"handle_token": GLib.Variant("s", token),
+            ({"session_handle_token": GLib.Variant("s", session_token),
+              "handle_token": GLib.Variant("s", handle_token),
               "app_id": GLib.Variant("s", "deep-live-cam")},),
         )
         self._call_portal("CreateSession", params)
+
         escaped = self._conn.get_unique_name().replace(".", "_").lstrip(":")
         self._session_handle = (
             self._response_details.get("session_handle")
-            or f"{_PORTAL_OBJECT_PATH}/session/{escaped}_{token}"
+            or f"{_PORTAL_OBJECT_PATH}/session/{escaped}_{session_token}"
         )
 
     def select_sources(self) -> None:
         if self._session_handle is None:
             raise RuntimeError("No session created")
-        token = self._token()
+        handle_token = self._token()
         params = GLib.Variant(
             "(oa{sv})",
             (self._session_handle, {
-                "handle_token": GLib.Variant("s", token),
+                "handle_token": GLib.Variant("s", handle_token),
                 "types": GLib.Variant("u", 2),       # windows only
                 "multiple": GLib.Variant("b", False),
                 "cursor_mode": GLib.Variant("u", 2),  # embedded
@@ -184,14 +207,14 @@ class _ScreenCastPortal:
         self._call_portal("SelectSources", params)
 
     def start(self) -> Tuple[int, int]:
-        """Start the session. Returns (pipe_wire_fd, node_id)."""
+        """Start the session.  Returns (pipe_wire_fd, node_id)."""
         if self._session_handle is None:
             raise RuntimeError("No session created")
-        token = self._token()
+        handle_token = self._token()
         params = GLib.Variant(
-            "(oa{sv})",
-            (self._session_handle, {
-                "handle_token": GLib.Variant("s", token),
+            "(osa{sv})",
+            (self._session_handle, "", {
+                "handle_token": GLib.Variant("s", handle_token),
             }),
         )
         result, out_fd_list = self._call_portal("Start", params, need_fd=True)
@@ -209,26 +232,13 @@ class _ScreenCastPortal:
         if out_fd_list is None:
             raise RuntimeError("No file descriptor list returned from portal")
 
-        fd_index = 0
-        props = stream[1] if len(stream) > 1 else {}
-        if "fd" in props:
-            fd_index = int(props["fd"])
-
-        fd = out_fd_list.get(fd_index)
+        fd = out_fd_list.get(0)
         if fd < 0:
-            raise RuntimeError(f"Invalid fd at index {fd_index}")
+            raise RuntimeError("Invalid PipeWire fd from portal")
 
         self._fd = fd
         self._node_id = node_id
         return fd, node_id
-
-    @property
-    def fd(self) -> Optional[int]:
-        return self._fd
-
-    @property
-    def node_id(self) -> Optional[int]:
-        return self._node_id
 
 
 # ─── public API ──────────────────────────────────────────────────────────
@@ -281,9 +291,7 @@ class WindowCapturer:
         self.actual_fps: float = 30.0
         self.frame_callback = None
 
-    def start_with_fd(
-        self, fd: int, node_id: int, fps: int = 30,
-    ) -> bool:
+    def start_with_fd(self, fd: int, node_id: int, fps: int = 30) -> bool:
         """Build and start the GStreamer pipeline from a PipeWire fd."""
         if not _HAS_GST:
             return False
@@ -296,22 +304,19 @@ class WindowCapturer:
             )
             self._pipeline = Gst.parse_launch(pipeline_str)
             self._appsink = self._pipeline.get_by_name("sink")
-
             self._pipeline.set_state(Gst.State.PLAYING)
 
-            # Wait briefly for caps negotiation or error
             bus = self._pipeline.get_bus()
             msg = bus.timed_pop_filtered(
                 Gst.SECOND * 5,
                 Gst.MessageType.ERROR | Gst.MessageType.STATE_CHANGED,
             )
             if msg and msg.type == Gst.MessageType.ERROR:
-                err, _debug = msg.parse_error()
+                err, _ = msg.parse_error()
                 print(f"GStreamer error: {err.message}")
                 self.release()
                 return False
 
-            # Pull first frame to determine dimensions
             sample = self._appsink.emit("pull-sample")
             if sample:
                 caps = sample.get_caps()
@@ -335,8 +340,6 @@ class WindowCapturer:
     # ── VideoCapturer-compatible interface ─────────────────────────────
 
     def start(self, width: int = 0, height: int = 0, fps: int = 30) -> bool:
-        """Not used directly — call run_portal_session() first, then
-        start_with_fd().  Kept for interface compatibility."""
         raise NotImplementedError(
             "Use run_portal_session() + start_with_fd() instead"
         )
