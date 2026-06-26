@@ -1,7 +1,7 @@
 # --- START OF FILE globals.py ---
 
 import os
-from typing import List, Dict, Any
+from typing import Any, Dict, List, Tuple
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 WORKFLOW_DIR = os.path.join(ROOT_DIR, "workflow")
@@ -34,6 +34,9 @@ nsfw_filter: bool = False
 # Video Output Options
 video_encoder: str | None = None
 video_quality: int | None = None # Typically a CRF value or bitrate
+
+# Screen Capture Options
+screen_capture_region: Tuple[int, int, int, int] | None = None  # (left, top, width, height)
 
 # Live Mode Options
 live_mirror: bool = False
