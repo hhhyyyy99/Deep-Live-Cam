@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QListWidget,
     QMainWindow,
     QPushButton,
     QScrollArea,
@@ -75,7 +76,7 @@ from modules.utilities import (
 )
 from modules import imread_unicode
 from modules.video_capture import VideoCapturer
-from modules.window_capture import WindowCapturer, PortalSession
+from modules.window_capture import WindowCapturer, list_windows
 
 if platform.system() == "Windows":
     from pygrabber.dshow_graph import FilterGraph
@@ -958,27 +959,61 @@ class MainWindow(QMainWindow):
             if modules.globals.source_path is None:
                 update_status("Please select a source image first")
                 return
-        update_status("Opening window picker...")
 
-        def on_done(fd, node_id):
-            update_status(f"Window selected, starting capture...")
+        # Show window picker dialog
+        windows = list_windows()
+        if not windows:
+            update_status("No capturable windows found.")
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(_("Select a Window"))
+        dialog.setMinimumSize(500, 400)
+        layout = QVBoxLayout(dialog)
+
+        layout.addWidget(QLabel(_("Select a window to capture:")))
+        list_widget = QListWidget()
+        for w in windows:
+            list_widget.addItem(f"{w['title']}  ({w['width']}x{w['height']})")
+        list_widget.setCurrentRow(0)
+        layout.addWidget(list_widget, 1)
+
+        btn_row = QHBoxLayout()
+        btn_refresh = QPushButton(_("Refresh"))
+        btn_refresh.setObjectName("secondary")
+
+        def refresh():
+            list_widget.clear()
+            for w in list_windows():
+                list_widget.addItem(f"{w['title']}  ({w['width']}x{w['height']})")
+
+        btn_refresh.clicked.connect(refresh)
+        btn_ok = QPushButton(_("OK"))
+        btn_row.addWidget(btn_refresh)
+        btn_row.addWidget(btn_ok)
+        layout.addLayout(btn_row)
+
+        def on_accept():
+            idx = list_widget.currentRow()
+            if idx < 0 or idx >= len(windows):
+                return
+            hwnd = windows[idx]["hwnd"]
+            dialog.accept()
             if not modules.globals.map_faces:
                 from modules.face_analyser import get_face_analyser
                 from modules.processors.frame.face_swapper import get_face_swapper
                 get_face_analyser()
                 get_face_swapper()
-                _open_window_preview(fd, node_id)
+                _open_window_preview(hwnd)
             else:
                 modules.globals.source_target_map = []
                 _open_window_live_mapper_dialog(
-                    fd, node_id, modules.globals.source_target_map,
+                    hwnd, modules.globals.source_target_map,
                 )
 
-        def on_error(msg):
-            update_status(f"Window capture error: {msg}")
-
-        self._portal_session = PortalSession()
-        self._portal_session.start(on_done, on_error)
+        btn_ok.clicked.connect(on_accept)
+        list_widget.doubleClicked.connect(on_accept)
+        dialog.exec()
 
     def closeEvent(self, event):
         # Treat OS-level close as Destroy click
@@ -1307,13 +1342,13 @@ def _open_webcam_preview(camera_index: int) -> None:
     _WEBCAM_PREVIEW.show()
 
 
-def _open_window_preview(fd: int, node_id: int) -> None:
+def _open_window_preview(hwnd: int) -> None:
     global _WEBCAM_PREVIEW
     if _WEBCAM_PREVIEW is not None:
         _WEBCAM_PREVIEW.close()
-    capturer = WindowCapturer()
-    if not capturer.start_with_fd(fd, node_id):
-        update_status("Failed to start window capture pipeline")
+    capturer = WindowCapturer(hwnd)
+    if not capturer.start():
+        update_status("Failed to start window capture")
         return
     _WEBCAM_PREVIEW = WebcamPreviewWindow(capturer=capturer)
     _WEBCAM_PREVIEW.setWindowTitle("Window Capture Preview")
@@ -1428,11 +1463,10 @@ class LiveMapperDialog(QDialog):
     """Source × Target mapper for live webcam / window capture mode."""
 
     def __init__(self, camera_index: int, mapping: list,
-                 window_fd: int = -1, window_node_id: int = -1):
+                 window_hwnd: int = -1):
         super().__init__(_MAIN)
         self._camera_index = camera_index
-        self._window_fd = window_fd
-        self._window_node_id = window_node_id
+        self._window_hwnd = window_hwnd
         self._map = mapping
         self.setWindowTitle(_("Source x Target Mapper"))
         self.resize(POPUP_LIVE_WIDTH, POPUP_LIVE_HEIGHT)
@@ -1541,8 +1575,8 @@ class LiveMapperDialog(QDialog):
             simplify_maps()
             self.set_status("Mappings successfully submitted!")
             self.accept()
-            if self._window_fd >= 0:
-                _open_window_preview(self._window_fd, self._window_node_id)
+            if self._window_hwnd >= 0:
+                _open_window_preview(self._window_hwnd)
             else:
                 _open_webcam_preview(self._camera_index)
         else:
@@ -1563,13 +1597,11 @@ def _open_live_mapper_dialog(camera_index: int, mapping: list) -> None:
     _LIVE_MAPPER.show()
 
 
-def _open_window_live_mapper_dialog(
-    fd: int, node_id: int, mapping: list,
-) -> None:
+def _open_window_live_mapper_dialog(hwnd: int, mapping: list) -> None:
     global _LIVE_MAPPER
     close_mapper_window()
     _LIVE_MAPPER = LiveMapperDialog(camera_index=-1, mapping=mapping,
-                                    window_fd=fd, window_node_id=node_id)
+                                    window_hwnd=hwnd)
     _LIVE_MAPPER.show()
 
 

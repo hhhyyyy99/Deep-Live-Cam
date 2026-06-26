@@ -140,18 +140,15 @@ python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
 ```
+For Windows **Window Capture** (built-in, no extra setup needed):
+Window Capture uses `pywin32` (included in requirements.txt) to capture any open window.
+
 For Linux:
 ```bash
 # Ensure you use the installed Python 3.11
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-```
-
-For Linux **Window Capture** (Wayland only):
-```bash
-# System packages needed for PyGObject build + GStreamer PipeWire support
-sudo apt install libgirepository1.0-dev libcairo2-dev gir1.2-gstreamer-1.0 gstreamer1.0-pipewire xdg-desktop-portal
 ```
 
 **For macOS:**
