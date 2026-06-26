@@ -150,7 +150,8 @@ pip install -r requirements.txt
 
 For Linux **Window Capture** (Wayland only):
 ```bash
-sudo apt install gir1.2-gstreamer-1.0 gstreamer1.0-pipewire xdg-desktop-portal
+# System packages needed for PyGObject build + GStreamer PipeWire support
+sudo apt install libgirepository1.0-dev libcairo2-dev gir1.2-gstreamer-1.0 gstreamer1.0-pipewire xdg-desktop-portal
 ```
 
 **For macOS:**
