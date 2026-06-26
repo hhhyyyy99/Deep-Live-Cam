@@ -959,14 +959,19 @@ class MainWindow(QMainWindow):
                 update_status("Please select a source image first")
                 return
         update_status("Opening window picker...")
-        # Run portal dialog in background thread to keep Qt responsive
         self._portal_worker = _PortalWorker()
         self._portal_worker.finished.connect(self._on_portal_finished)
+        self._portal_worker.error.connect(
+            lambda msg: update_status(f"Window capture error: {msg}")
+        )
         self._portal_worker.start()
 
     def _on_portal_finished(self, result) -> None:
         if result is None:
-            update_status("Window capture cancelled or failed.")
+            # Error message already shown via error signal, or user cancelled
+            if self._portal_worker and not self._portal_worker.isRunning():
+                return  # error already displayed
+            update_status("Window capture cancelled.")
             return
         fd, node_id = result
         if not modules.globals.map_faces:
@@ -1056,10 +1061,15 @@ class _PortalWorker(QThread):
     so the Qt event loop stays responsive while the user picks a window."""
 
     finished = Signal(object)  # (fd, node_id) or None
+    error = Signal(str)        # error message
 
     def run(self) -> None:
-        result = run_portal_session()
-        self.finished.emit(result)
+        try:
+            result = run_portal_session()
+            self.finished.emit(result)
+        except Exception as e:
+            self.error.emit(str(e))
+            self.finished.emit(None)
 
 
 class _CaptureWorker(QThread):
