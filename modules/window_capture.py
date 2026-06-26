@@ -39,22 +39,114 @@ def _token() -> str:
     return "dlc" + uuid.uuid4().hex[:8]
 
 
-class _ScreenCastPortal:
-    """Manages an xdg-desktop-portal ScreenCast session via GDBus.
+def _request_path(conn: Gio.DBusConnection, handle_token: str) -> str:
+    escaped = conn.get_unique_name().replace(".", "_").lstrip(":")
+    return f"{_PORTAL_OBJECT_PATH}/request/{escaped}/{handle_token}"
 
-    The portal API uses two distinct tokens:
-    - ``handle_token``  – for the Request object path (Response signal routing).
-    - ``session_handle_token`` – for the Session object path
-      (CreateSession only).
 
-    The request path format is::
+def _extract_handle_token(params: GLib.Variant) -> Optional[str]:
+    """Walk the variant tuple to find 'handle_token' in the embedded dict."""
+    for i in range(params.n_children()):
+        child = params.get_child_value(i)
+        if child.get_type_string() == "a{sv}":
+            d = child
+            for j in range(d.n_children()):
+                entry = d.get_child_value(j)
+                if entry.get_child_value(0).get_string() == "handle_token":
+                    return entry.get_child_value(1).get_variant().get_string()
+    return None
 
-        /org/freedesktop/portal/desktop/request/{escaped_sender}/{handle_token}
 
-    We compute this path from our own handle_token *before* calling the portal
-    method, then subscribe to the Response signal at that path so we never
-    miss it.
+def _portal_call(
+    conn: Gio.DBusConnection,
+    method: str,
+    params: GLib.Variant,
+    need_fd: bool = False,
+) -> Tuple[dict, Optional[Gio.UnixFDList]]:
+    """Call a portal method and wait for its Response signal.
+
+    Uses conn.call_sync() for the D-Bus call (fast, non-blocking for the
+    portal UI) and GLib.MainLoop.run() to dispatch the Response signal.
+    Must be called from a thread where the GLib default main context is
+    available (i.e. any thread — it's thread-safe).
     """
+    handle_token = _extract_handle_token(params)
+    if handle_token is None:
+        raise RuntimeError(f"{method}: no handle_token in parameters")
+
+    req_path = _request_path(conn, handle_token)
+
+    state = {"done": False, "result": -1, "details": {}, "fd_list": None}
+    loop = GLib.MainLoop()
+
+    def on_response(_c, _s, _o, _i, _sig, resp_params):
+        state["result"] = resp_params[0]
+        d = resp_params[1] if len(resp_params) > 1 else {}
+        state["details"] = {k: d[k] for k in d.keys()}
+        state["done"] = True
+        loop.quit()
+
+    # Subscribe BEFORE calling so we never miss the signal.
+    sub_id = conn.signal_subscribe(
+        None,
+        "org.freedesktop.portal.Request",
+        "Response",
+        req_path,
+        None,
+        Gio.DBusSignalFlags.NONE,
+        on_response,
+    )
+
+    try:
+        # call_sync is fast — the D-Bus method reply comes back in <1ms.
+        # The portal UI (window picker) is rendered by GNOME Shell, not us.
+        if need_fd:
+            _, fd_list = conn.call_with_unix_fd_list_sync(
+                _PORTAL_BUS_NAME,
+                _PORTAL_OBJECT_PATH,
+                _PORTAL_IFACE,
+                method,
+                params,
+                None,
+                Gio.DBusCallFlags.NONE,
+                -1,
+                None,
+                None,
+            )
+            state["fd_list"] = fd_list
+        else:
+            conn.call_sync(
+                _PORTAL_BUS_NAME,
+                _PORTAL_OBJECT_PATH,
+                _PORTAL_IFACE,
+                method,
+                params,
+                None,
+                Gio.DBusCallFlags.NONE,
+                -1,
+                None,
+            )
+
+        # Run the GLib main loop to dispatch the Response signal.
+        GLib.timeout_add(120_000, lambda: loop.quit() or False)
+        loop.run()
+
+        if not state["done"]:
+            raise TimeoutError(
+                f"Portal {method} timed out — user didn't respond?"
+            )
+        if state["result"] != 0:
+            raise RuntimeError(
+                f"Portal {method} failed with code {state['result']}"
+            )
+        return state["details"], state["fd_list"]
+
+    finally:
+        conn.signal_unsubscribe(sub_id)
+
+
+class _ScreenCastPortal:
+    """Manages an xdg-desktop-portal ScreenCast session via GDBus."""
 
     def __init__(self):
         if not _HAS_GST:
@@ -62,190 +154,54 @@ class _ScreenCastPortal:
         self._conn: Gio.DBusConnection = Gio.bus_get_sync(
             Gio.BusType.SESSION, None
         )
-        self._escaped_sender = (
+        self._escaped = (
             self._conn.get_unique_name().replace(".", "_").lstrip(":")
         )
         self._session_handle: Optional[str] = None
-        self._fd: Optional[int] = None
-        self._node_id: Optional[int] = None
-
-    # ── D-Bus helpers ──────────────────────────────────────────────────
-
-    def _request_path(self, handle_token: str) -> str:
-        return (
-            f"{_PORTAL_OBJECT_PATH}/request/"
-            f"{self._escaped_sender}/{handle_token}"
-        )
-
-    def _call_portal(
-        self,
-        method: str,
-        parameters: GLib.Variant,
-        need_fd: bool = False,
-    ) -> Optional[Tuple[GLib.Variant, Optional[Gio.UnixFDList]]]:
-        """Call a portal method and block until its Response signal arrives.
-
-        Uses the async GDBus ``call()`` API so the GLib default main context
-        keeps dispatching events (including the portal's UI rendering) while
-        we wait for the Response signal on a background thread.
-        """
-        handle_token = self._extract_handle_token(parameters)
-        if handle_token is None:
-            raise RuntimeError(f"{method}: no handle_token in parameters")
-
-        req_path = self._request_path(handle_token)
-
-        # Shared state between callbacks
-        state = {"done": False, "result": -1, "details": {}, "fd_list": None}
-        loop = GLib.MainLoop()
-
-        def on_response(_conn, _sender, _path, _iface, _sig, params):
-            state["result"] = params[0]
-            details = params[1] if len(params) > 1 else {}
-            state["details"] = {k: details[k] for k in details.keys()}
-            state["done"] = True
-            loop.quit()
-
-        sub_id = self._conn.signal_subscribe(
-            None,
-            "org.freedesktop.portal.Request",
-            "Response",
-            req_path,
-            None,
-            Gio.DBusSignalFlags.NONE,
-            on_response,
-        )
-
-        try:
-            # Use async call() so the GLib main context keeps running
-            # (required for the portal's window-picker UI to render).
-            def on_reply(conn, result, _user_data):
-                try:
-                    if need_fd:
-                        reply, fd_list = conn.call_with_unix_fd_list_finish(result)
-                        state["fd_list"] = fd_list
-                    else:
-                        conn.call_finish(result)
-                except Exception as e:
-                    state["done"] = True
-                    state["result"] = -2
-                    state["details"] = {"error": str(e)}
-                    loop.quit()
-
-            if need_fd:
-                self._conn.call_with_unix_fd_list(
-                    _PORTAL_BUS_NAME,
-                    _PORTAL_OBJECT_PATH,
-                    _PORTAL_IFACE,
-                    method,
-                    parameters,
-                    None,
-                    Gio.DBusCallFlags.NONE,
-                    -1,
-                    None,
-                    on_reply,
-                    None,
-                )
-            else:
-                self._conn.call(
-                    _PORTAL_BUS_NAME,
-                    _PORTAL_OBJECT_PATH,
-                    _PORTAL_IFACE,
-                    method,
-                    parameters,
-                    None,
-                    Gio.DBusCallFlags.NONE,
-                    -1,
-                    None,
-                    on_reply,
-                    None,
-                )
-
-            # Run the GLib main loop — this dispatches both the D-Bus reply
-            # callback AND the Response signal, and also processes portal UI
-            # events (window picker dialog rendering).
-            GLib.timeout_add(120_000, lambda: loop.quit() or False)
-            loop.run()
-
-            if not state["done"]:
-                raise TimeoutError(
-                    f"Portal {method} timed out — user didn't respond?"
-                )
-            if state["result"] == -2:
-                raise RuntimeError(
-                    f"Portal {method} D-Bus error: "
-                    f"{state['details'].get('error', 'unknown')}"
-                )
-            if state["result"] != 0:
-                raise RuntimeError(
-                    f"Portal {method} failed with code {state['result']}"
-                )
-            return state["details"], state["fd_list"]
-
-        finally:
-            self._conn.signal_unsubscribe(sub_id)
-
-    @staticmethod
-    def _extract_handle_token(params: GLib.Variant) -> Optional[str]:
-        """Walk the variant tuple to find the 'handle_token' entry in the
-        embedded dict (works for (a{sv}), (oa{sv}), (osa{sv}))."""
-        outer = params
-        for i in range(outer.n_children()):
-            child = outer.get_child_value(i)
-            if child.get_type_string() == "a{sv}":
-                d = child
-                for j in range(d.n_children()):
-                    entry = d.get_child_value(j)
-                    if entry.get_child_value(0).get_string() == "handle_token":
-                        return entry.get_child_value(1).get_variant().get_string()
-        return None
-
-    # ── Portal API methods ─────────────────────────────────────────────
 
     def create_session(self) -> None:
         session_token = _token()
-        handle_token = _token()
         params = GLib.Variant(
             "(a{sv})",
             ({
                 "session_handle_token": GLib.Variant("s", session_token),
-                "handle_token": GLib.Variant("s", handle_token),
+                "handle_token": GLib.Variant("s", _token()),
                 "app_id": GLib.Variant("s", "deep-live-cam"),
             },),
         )
-        self._call_portal("CreateSession", params)
+        _portal_call(self._conn, "CreateSession", params)
         self._session_handle = (
             f"{_PORTAL_OBJECT_PATH}/session/"
-            f"{self._escaped_sender}/{session_token}"
+            f"{self._escaped}/{session_token}"
         )
 
     def select_sources(self) -> None:
         if self._session_handle is None:
             raise RuntimeError("No session created")
-        handle_token = _token()
         params = GLib.Variant(
             "(oa{sv})",
             (self._session_handle, {
-                "handle_token": GLib.Variant("s", handle_token),
+                "handle_token": GLib.Variant("s", _token()),
                 "types": GLib.Variant("u", 2),       # windows only
                 "multiple": GLib.Variant("b", False),
                 "cursor_mode": GLib.Variant("u", 2),  # embedded
             }),
         )
-        self._call_portal("SelectSources", params)
+        _portal_call(self._conn, "SelectSources", params)
 
-    def start_and_get_stream(self) -> Tuple[int, int]:
-        """Start and return (fd, node_id) from the portal response."""
+    def start(self) -> Tuple[int, int]:
+        """Start the session. Returns (pipe_wire_fd, node_id)."""
         if self._session_handle is None:
             raise RuntimeError("No session created")
-        handle_token = _token()
         params = GLib.Variant(
             "(osa{sv})",
             (self._session_handle, "", {
-                "handle_token": GLib.Variant("s", handle_token),
+                "handle_token": GLib.Variant("s", _token()),
             }),
         )
-        details, fd_list = self._call_portal("Start", params, need_fd=True)
+        details, fd_list = _portal_call(
+            self._conn, "Start", params, need_fd=True,
+        )
 
         streams = details.get("streams")
         if streams is None:
@@ -256,8 +212,6 @@ class _ScreenCastPortal:
         if fd < 0:
             raise RuntimeError("Invalid PipeWire fd")
 
-        self._fd = fd
-        self._node_id = node_id
         return fd, node_id
 
 
@@ -281,7 +235,7 @@ def run_portal_session() -> Optional[Tuple[int, int]]:
         portal = _ScreenCastPortal()
         portal.create_session()
         portal.select_sources()
-        fd, node_id = portal.start_and_get_stream()
+        fd, node_id = portal.start()
         return fd, node_id
     except TimeoutError as e:
         print(f"Window capture: {e}")
