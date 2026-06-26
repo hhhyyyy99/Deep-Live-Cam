@@ -100,19 +100,17 @@ class WindowCapturer:
             return False, None
 
         try:
-            # Check window still exists
             if not win32gui.IsWindow(self._hwnd):
                 return False, None
 
-            # Get current window dimensions
-            rect = win32gui.GetWindowRect(self._hwnd)
-            w = rect[2] - rect[0]
-            h = rect[3] - rect[1]
+            # Get current window client area dimensions
+            left, top, right, bottom = win32gui.GetClientRect(self._hwnd)
+            w = right - left
+            h = bottom - top
             if w <= 0 or h <= 0:
                 return False, None
 
-            # Create device context and bitmap
-            hwnd_dc = win32gui.GetWindowDC(self._hwnd)
+            hwnd_dc = win32gui.GetDC(self._hwnd)
             mfc_dc = win32ui.CreateDCFromHandle(hwnd_dc)
             save_dc = mfc_dc.CreateCompatibleDC()
 
@@ -120,33 +118,23 @@ class WindowCapturer:
             bitmap.CreateCompatibleBitmap(mfc_dc, w, h)
             save_dc.SelectObject(bitmap)
 
-            # PrintWindow captures the window content even when occluded
-            # PW_RENDERFULLCONTENT = 0x00000002 (Win 8.1+)
-            result = win32gui.PrintWindow(self._hwnd, save_dc.GetSafeHdc(), 0x00000002)
+            # Use BitBlt for reliable color reproduction
+            save_dc.BitBlt(
+                (0, 0), (w, h), mfc_dc, (0, 0), win32con.SRCCOPY,
+            )
 
-            if result:
-                bmp_info = bitmap.GetInfo()
-                bmp_bits = bitmap.GetBitmapBits(True)
-                frame = np.frombuffer(bmp_bits, dtype=np.uint8).reshape((h, w, 4))
-                # BGRA → BGR
-                bgr = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
-            else:
-                # Fallback: BitBlt
-                save_dc.BitBlt(
-                    (0, 0), (w, h), mfc_dc, (0, 0), win32con.SRCCOPY,
-                )
-                bmp_info = bitmap.GetInfo()
-                bmp_bits = bitmap.GetBitmapBits(True)
-                frame = np.frombuffer(bmp_bits, dtype=np.uint8).reshape((h, w, 4))
-                bgr = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+            bmp_bits = bitmap.GetBitmapBits(False)
+            # Bitmap is 32-bit BGRA with possible padding per row
+            stride = w * 4
+            frame = np.frombuffer(bmp_bits, dtype=np.uint8)[:stride * h].reshape((h, w, 4))
+            # Extract BGR channels only (drop alpha)
+            bgr = frame[:, :, :3].copy()
 
-            # Cleanup
             save_dc.DeleteDC()
             mfc_dc.DeleteDC()
             win32gui.ReleaseDC(self._hwnd, hwnd_dc)
             win32gui.DeleteObject(bitmap.GetHandle())
 
-            # Update dimensions if changed
             if w != self.actual_width or h != self.actual_height:
                 self.actual_width = w
                 self.actual_height = h
