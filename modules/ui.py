@@ -75,7 +75,7 @@ from modules.utilities import (
 )
 from modules import imread_unicode
 from modules.video_capture import VideoCapturer
-from modules.screen_capture import ScreenCapturer, get_screen_monitors
+from modules.window_capture import WindowCapturer
 
 if platform.system() == "Windows":
     from pygrabber.dshow_graph import FilterGraph
@@ -727,13 +727,13 @@ class MainWindow(QMainWindow):
         sep.setStyleSheet("color: #555; padding: 0 4px;")
         layout.addWidget(sep)
 
-        # Screen capture section
-        self.btn_screen_capture = QPushButton(_("Screen Capture"))
-        self.btn_screen_capture.setToolTip(
-            _("Select a screen region to capture for real-time face swap")
+        # Window capture section
+        self.btn_window_capture = QPushButton(_("Window Capture"))
+        self.btn_window_capture.setToolTip(
+            _("Select an open window to capture for real-time face swap")
         )
-        self.btn_screen_capture.clicked.connect(self._on_screen_capture)
-        layout.addWidget(self.btn_screen_capture)
+        self.btn_window_capture.clicked.connect(self._on_window_capture)
+        layout.addWidget(self.btn_window_capture)
 
         return card
 
@@ -949,7 +949,7 @@ class MainWindow(QMainWindow):
             modules.globals.source_target_map = []
             _open_live_mapper_dialog(camera_index, modules.globals.source_target_map)
 
-    def _on_screen_capture(self) -> None:
+    def _on_window_capture(self) -> None:
         if _LIVE_MAPPER is not None and _LIVE_MAPPER.isVisible():
             update_status("Source x Target Mapper is already open.")
             _LIVE_MAPPER.raise_()
@@ -958,24 +958,14 @@ class MainWindow(QMainWindow):
             if modules.globals.source_path is None:
                 update_status("Please select a source image first")
                 return
-        # Open region selector overlay
-        self._region_selector = RegionSelector()
-        self._region_selector.regionSelected.connect(self._on_region_selected)
-        self._region_selector.showFullScreen()
-
-    def _on_region_selected(self, left: int, top: int, w: int, h: int) -> None:
-        region = (left, top, w, h)
-        modules.globals.screen_capture_region = region
-        update_status(f"Screen region selected: {w}x{h} at ({left},{top})")
-        if not modules.globals.map_faces:
             from modules.face_analyser import get_face_analyser
             from modules.processors.frame.face_swapper import get_face_swapper
             get_face_analyser()
             get_face_swapper()
-            _open_screen_preview(region)
+            _open_window_preview()
         else:
             modules.globals.source_target_map = []
-            _open_screen_live_mapper_dialog(region, modules.globals.source_target_map)
+            _open_window_live_mapper_dialog(modules.globals.source_target_map)
 
     def closeEvent(self, event):
         # Treat OS-level close as Destroy click
@@ -1046,92 +1036,6 @@ class PreviewWindow(QWidget):
 
 
 # ─── webcam preview window ───────────────────────────────────────────────
-
-
-# ─── screen region selector overlay ─────────────────────────────────────
-
-
-class RegionSelector(QWidget):
-    """Fullscreen transparent overlay for drawing a capture rectangle."""
-
-    regionSelected = Signal(int, int, int, int)  # left, top, width, height
-
-    def __init__(self):
-        super().__init__()
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool
-        )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setWindowState(Qt.WindowState.WindowFullScreen)
-        self.setCursor(Qt.CursorShape.CrossCursor)
-
-        self._origin: Optional[Tuple[int, int]] = None
-        self._current: Optional[Tuple[int, int]] = None
-        self._screen_geo = QApplication.primaryScreen().geometry()
-        self.setGeometry(self._screen_geo)
-
-    def paintEvent(self, _event) -> None:
-        from PySide6.QtGui import QColor, QPainter, QPen
-        painter = QPainter(self)
-        # Semi-transparent dark overlay
-        painter.fillRect(self.rect(), QColor(0, 0, 0, 80))
-
-        if self._origin and self._current:
-            x0, y0 = self._origin
-            x1, y1 = self._current
-            rect = (
-                min(x0, x1) - self._screen_geo.x(),
-                min(y0, y1) - self._screen_geo.y(),
-                abs(x1 - x0),
-                abs(y1 - y0),
-            )
-            # Clear the selected region
-            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
-            painter.fillRect(*rect, Qt.GlobalColor.transparent)
-            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
-            # Draw border
-            pen = QPen(QColor(45, 108, 223), 2)
-            painter.setPen(pen)
-            painter.drawRect(*rect)
-            # Size label
-            painter.setPen(QColor(255, 255, 255))
-            painter.drawText(
-                rect[0] + 4, rect[1] - 4,
-                f"{rect[2]}x{rect[3]}",
-            )
-        painter.end()
-
-    def mousePressEvent(self, event) -> None:
-        self._origin = (event.globalPosition().x(), event.globalPosition().y())
-        self._current = self._origin
-        self.update()
-
-    def mouseMoveEvent(self, event) -> None:
-        self._current = (event.globalPosition().x(), event.globalPosition().y())
-        self.update()
-
-    def mouseReleaseEvent(self, event) -> None:
-        self._current = (event.globalPosition().x(), event.globalPosition().y())
-        if self._origin and self._current:
-            x0, y0 = self._origin
-            x1, y1 = self._current
-            left = min(x0, x1)
-            top = min(y0, y1)
-            w = abs(x1 - x0)
-            h = abs(y1 - y0)
-            if w > 10 and h > 10:
-                self.regionSelected.emit(
-                    left - self._screen_geo.x(),
-                    top - self._screen_geo.y(),
-                    w, h,
-                )
-        self.close()
-
-    def keyPressEvent(self, event) -> None:
-        if event.key() == Qt.Key.Key_Escape:
-            self.close()
 
 
 class _CaptureWorker(QThread):
@@ -1315,7 +1219,7 @@ class WebcamPreviewWindow(QWidget):
         if capturer is not None:
             self._cap = capturer
             if not self._cap.start():
-                update_status("Failed to start screen capture")
+                update_status("Failed to start window capture")
                 QTimer.singleShot(0, self.close)
                 return
         else:
@@ -1390,13 +1294,13 @@ def _open_webcam_preview(camera_index: int) -> None:
     _WEBCAM_PREVIEW.show()
 
 
-def _open_screen_preview(region: Tuple[int, int, int, int]) -> None:
+def _open_window_preview() -> None:
     global _WEBCAM_PREVIEW
     if _WEBCAM_PREVIEW is not None:
         _WEBCAM_PREVIEW.close()
-    capturer = ScreenCapturer(region)
+    capturer = WindowCapturer()
     _WEBCAM_PREVIEW = WebcamPreviewWindow(capturer=capturer)
-    _WEBCAM_PREVIEW.setWindowTitle("Screen Capture Preview")
+    _WEBCAM_PREVIEW.setWindowTitle("Window Capture Preview")
     _WEBCAM_PREVIEW.show()
 
 
@@ -1505,13 +1409,13 @@ class MapperDialog(QDialog):
 
 
 class LiveMapperDialog(QDialog):
-    """Source × Target mapper for live webcam / screen capture mode."""
+    """Source × Target mapper for live webcam / window capture mode."""
 
     def __init__(self, camera_index: int, mapping: list,
-                 screen_region: Optional[Tuple[int, int, int, int]] = None):
+                 window_capture: bool = False):
         super().__init__(_MAIN)
         self._camera_index = camera_index
-        self._screen_region = screen_region
+        self._window_capture = window_capture
         self._map = mapping
         self.setWindowTitle(_("Source x Target Mapper"))
         self.resize(POPUP_LIVE_WIDTH, POPUP_LIVE_HEIGHT)
@@ -1620,8 +1524,8 @@ class LiveMapperDialog(QDialog):
             simplify_maps()
             self.set_status("Mappings successfully submitted!")
             self.accept()
-            if self._screen_region is not None:
-                _open_screen_preview(self._screen_region)
+            if self._window_capture:
+                _open_window_preview()
             else:
                 _open_webcam_preview(self._camera_index)
         else:
@@ -1642,13 +1546,11 @@ def _open_live_mapper_dialog(camera_index: int, mapping: list) -> None:
     _LIVE_MAPPER.show()
 
 
-def _open_screen_live_mapper_dialog(
-    region: Tuple[int, int, int, int], mapping: list
-) -> None:
+def _open_window_live_mapper_dialog(mapping: list) -> None:
     global _LIVE_MAPPER
     close_mapper_window()
     _LIVE_MAPPER = LiveMapperDialog(camera_index=-1, mapping=mapping,
-                                    screen_region=region)
+                                    window_capture=True)
     _LIVE_MAPPER.show()
 
 
