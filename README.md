@@ -148,6 +148,11 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
+For Linux **Window Capture** (Wayland only):
+```bash
+sudo apt install gir1.2-gstreamer-1.0 gstreamer1.0-pipewire xdg-desktop-portal
+```
+
 **For macOS:**
 
 Apple Silicon (M1/M2/M3) requires specific setup:
