@@ -1022,8 +1022,10 @@ class MainWindow(QMainWindow):
         # After dialog closes, start capture with selected window
         hwnd = self._selected_hwnd
         if hwnd is None:
+            update_status("No window selected.")
             return
 
+        update_status(f"Starting window capture (hwnd={hwnd:#x})...")
         if not modules.globals.map_faces:
             from modules.face_analyser import get_face_analyser
             from modules.processors.frame.face_swapper import get_face_swapper
@@ -1374,6 +1376,9 @@ def _open_window_preview(hwnd: int) -> None:
     _WEBCAM_PREVIEW = WebcamPreviewWindow(capturer=capturer)
     _WEBCAM_PREVIEW.setWindowTitle("Window Capture Preview")
     _WEBCAM_PREVIEW.show()
+    _WEBCAM_PREVIEW.raise_()
+    _WEBCAM_PREVIEW.activateWindow()
+    print(f"[window] Preview window shown ({capturer.actual_width}x{capturer.actual_height})", flush=True)
 
 
 # ─── mapper dialogs (image/video + live) ────────────────────────────────
