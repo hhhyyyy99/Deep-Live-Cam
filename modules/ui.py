@@ -75,7 +75,7 @@ from modules.utilities import (
 )
 from modules import imread_unicode
 from modules.video_capture import VideoCapturer
-from modules.window_capture import WindowCapturer
+from modules.window_capture import WindowCapturer, run_portal_session
 
 if platform.system() == "Windows":
     from pygrabber.dshow_graph import FilterGraph
@@ -958,14 +958,27 @@ class MainWindow(QMainWindow):
             if modules.globals.source_path is None:
                 update_status("Please select a source image first")
                 return
+        update_status("Opening window picker...")
+        # Run portal dialog in background thread to keep Qt responsive
+        self._portal_worker = _PortalWorker()
+        self._portal_worker.finished.connect(self._on_portal_finished)
+        self._portal_worker.start()
+
+    def _on_portal_finished(self, result) -> None:
+        if result is None:
+            update_status("Window capture cancelled or failed.")
+            return
+        fd, node_id = result
+        if not modules.globals.map_faces:
             from modules.face_analyser import get_face_analyser
             from modules.processors.frame.face_swapper import get_face_swapper
             get_face_analyser()
             get_face_swapper()
-            _open_window_preview()
+            _open_window_preview(fd, node_id)
         else:
             modules.globals.source_target_map = []
-            _open_window_live_mapper_dialog(modules.globals.source_target_map)
+            _open_window_live_mapper_dialog(fd, node_id,
+                                            modules.globals.source_target_map)
 
     def closeEvent(self, event):
         # Treat OS-level close as Destroy click
@@ -1036,6 +1049,17 @@ class PreviewWindow(QWidget):
 
 
 # ─── webcam preview window ───────────────────────────────────────────────
+
+
+class _PortalWorker(QThread):
+    """Runs the xdg-desktop-portal window-picker dialog in a background thread
+    so the Qt event loop stays responsive while the user picks a window."""
+
+    finished = Signal(object)  # (fd, node_id) or None
+
+    def run(self) -> None:
+        result = run_portal_session()
+        self.finished.emit(result)
 
 
 class _CaptureWorker(QThread):
@@ -1218,7 +1242,7 @@ class WebcamPreviewWindow(QWidget):
 
         if capturer is not None:
             self._cap = capturer
-            if not self._cap.start():
+            if not self._cap.is_running and not self._cap.start():
                 update_status("Failed to start window capture")
                 QTimer.singleShot(0, self.close)
                 return
@@ -1294,11 +1318,14 @@ def _open_webcam_preview(camera_index: int) -> None:
     _WEBCAM_PREVIEW.show()
 
 
-def _open_window_preview() -> None:
+def _open_window_preview(fd: int, node_id: int) -> None:
     global _WEBCAM_PREVIEW
     if _WEBCAM_PREVIEW is not None:
         _WEBCAM_PREVIEW.close()
     capturer = WindowCapturer()
+    if not capturer.start_with_fd(fd, node_id):
+        update_status("Failed to start window capture pipeline")
+        return
     _WEBCAM_PREVIEW = WebcamPreviewWindow(capturer=capturer)
     _WEBCAM_PREVIEW.setWindowTitle("Window Capture Preview")
     _WEBCAM_PREVIEW.show()
@@ -1412,10 +1439,11 @@ class LiveMapperDialog(QDialog):
     """Source × Target mapper for live webcam / window capture mode."""
 
     def __init__(self, camera_index: int, mapping: list,
-                 window_capture: bool = False):
+                 window_fd: int = -1, window_node_id: int = -1):
         super().__init__(_MAIN)
         self._camera_index = camera_index
-        self._window_capture = window_capture
+        self._window_fd = window_fd
+        self._window_node_id = window_node_id
         self._map = mapping
         self.setWindowTitle(_("Source x Target Mapper"))
         self.resize(POPUP_LIVE_WIDTH, POPUP_LIVE_HEIGHT)
@@ -1524,8 +1552,8 @@ class LiveMapperDialog(QDialog):
             simplify_maps()
             self.set_status("Mappings successfully submitted!")
             self.accept()
-            if self._window_capture:
-                _open_window_preview()
+            if self._window_fd >= 0:
+                _open_window_preview(self._window_fd, self._window_node_id)
             else:
                 _open_webcam_preview(self._camera_index)
         else:
@@ -1546,11 +1574,13 @@ def _open_live_mapper_dialog(camera_index: int, mapping: list) -> None:
     _LIVE_MAPPER.show()
 
 
-def _open_window_live_mapper_dialog(mapping: list) -> None:
+def _open_window_live_mapper_dialog(
+    fd: int, node_id: int, mapping: list,
+) -> None:
     global _LIVE_MAPPER
     close_mapper_window()
     _LIVE_MAPPER = LiveMapperDialog(camera_index=-1, mapping=mapping,
-                                    window_capture=True)
+                                    window_fd=fd, window_node_id=node_id)
     _LIVE_MAPPER.show()
 
 
