@@ -149,15 +149,20 @@ QPushButton#danger:hover  { background-color: #d8523c; }
 
 QComboBox {
     background-color: #2a2a2a;
+    color: #e6e6e6;
     border: 1px solid #404040;
     border-radius: 6px;
     padding: 6px 10px;
     min-height: 24px;
+    selection-background-color: #2d6cdf;
+    selection-color: #ffffff;
 }
 QComboBox:hover { border-color: #2d6cdf; }
 QComboBox QAbstractItemView {
     background-color: #2a2a2a;
+    color: #e6e6e6;
     selection-background-color: #2d6cdf;
+    selection-color: #ffffff;
     border: 1px solid #404040;
 }
 
@@ -979,8 +984,18 @@ class MainWindow(QMainWindow):
                 border: 1px solid #404040; border-radius: 6px;
                 font-size: 11pt;
             }
-            QListWidget::item:selected { background-color: #2d6cdf; }
-            QListWidget::item:hover { background-color: #3a3a3a; }
+            QListWidget::item { color: #e6e6e6; padding: 6px; }
+            QListWidget::item:selected {
+                background-color: #2d6cdf;
+                color: #ffffff;
+            }
+            QListWidget::item:selected:active,
+            QListWidget::item:selected:!active {
+                background-color: #2d6cdf;
+                color: #ffffff;
+            }
+            QListWidget::item:hover { background-color: #3a3a3a; color: #ffffff; }
+            QPushButton { color: #ffffff; }
         """)
         layout = QVBoxLayout(dialog)
 
@@ -1112,18 +1127,28 @@ class PreviewWindow(QWidget):
 class _CaptureWorker(QThread):
     """Reads frames from the camera into a bounded queue. Drops on overflow."""
 
-    def __init__(self, cap, capture_queue: queue.Queue, stop_event: threading.Event):
+    def __init__(self, cap, capture_queue: queue.Queue, stop_event: threading.Event,
+                 max_read_failures: int = 20):
         super().__init__()
         self._cap = cap
         self._queue = capture_queue
         self._stop = stop_event
+        self._max_read_failures = max_read_failures
 
     def run(self) -> None:
+        read_failures = 0
         while not self._stop.is_set():
             ret, frame = self._cap.read()
             if not ret:
-                self._stop.set()
-                break
+                read_failures += 1
+                if read_failures >= self._max_read_failures:
+                    detail = getattr(self._cap, "last_error", "") or "No frames received."
+                    update_status(f"Capture stopped: {detail}")
+                    self._stop.set()
+                    break
+                time.sleep(0.05)
+                continue
+            read_failures = 0
             try:
                 self._queue.put_nowait(frame)
             except queue.Full:
@@ -1276,7 +1301,8 @@ class _ProcessingWorker(QThread):
 
 
 class WebcamPreviewWindow(QWidget):
-    def __init__(self, camera_index: int = -1, capturer=None):
+    def __init__(self, camera_index: int = -1, capturer=None,
+                 initial_frame: Optional[np.ndarray] = None):
         super().__init__()
         self.setWindowTitle("Live Preview")
         self.resize(PREVIEW_DEFAULT_WIDTH, PREVIEW_DEFAULT_HEIGHT)
@@ -1286,11 +1312,17 @@ class WebcamPreviewWindow(QWidget):
         self._image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._image_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout.addWidget(self._image_label, 1)
+        if initial_frame is not None:
+            preview_frame = fit_image_to_size(
+                initial_frame, PREVIEW_DEFAULT_WIDTH, PREVIEW_DEFAULT_HEIGHT
+            )
+            self._image_label.setPixmap(_bgr_to_qpixmap(preview_frame))
 
         if capturer is not None:
             self._cap = capturer
             if not self._cap.is_running and not self._cap.start():
-                update_status("Failed to start window capture")
+                detail = getattr(self._cap, "last_error", "")
+                update_status(f"Failed to start window capture: {detail}")
                 QTimer.singleShot(0, self.close)
                 return
         else:
@@ -1371,9 +1403,16 @@ def _open_window_preview(hwnd: int) -> None:
         _WEBCAM_PREVIEW.close()
     capturer = WindowCapturer(hwnd)
     if not capturer.start():
-        update_status("Failed to start window capture")
+        detail = getattr(capturer, "last_error", "")
+        update_status(f"Failed to start window capture: {detail}")
         return
-    _WEBCAM_PREVIEW = WebcamPreviewWindow(capturer=capturer)
+    has_frame, first_frame = capturer.read()
+    if not has_frame or first_frame is None:
+        detail = getattr(capturer, "last_error", "") or "No frame was returned."
+        capturer.release()
+        update_status(f"Failed to read selected window: {detail}")
+        return
+    _WEBCAM_PREVIEW = WebcamPreviewWindow(capturer=capturer, initial_frame=first_frame)
     _WEBCAM_PREVIEW.setWindowTitle("Window Capture Preview")
     _WEBCAM_PREVIEW.show()
     _WEBCAM_PREVIEW.raise_()

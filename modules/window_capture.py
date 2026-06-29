@@ -76,20 +76,20 @@ class WindowCapturer:
         self.actual_fps: float = 30.0
         self.frame_callback = None
         self._last_frame: Optional[np.ndarray] = None
+        self.last_error: str = ""
 
     def start(self, width: int = 0, height: int = 0, fps: int = 30) -> bool:
         if not _IS_WINDOWS:
-            print("[WindowCapturer] Only supported on Windows.")
+            self._set_error("Only supported on Windows.")
             return False
         if not win32gui.IsWindow(self._hwnd):
-            print(f"[WindowCapturer] Invalid window handle: {self._hwnd:#x}")
+            self._set_error(f"Invalid window handle: {self._hwnd:#x}")
             return False
 
         try:
-            rect = win32gui.GetWindowRect(self._hwnd)
-            self.actual_width = rect[2] - rect[0]
-            self.actual_height = rect[3] - rect[1]
-        except Exception:
+            self.actual_width, self.actual_height = self._get_capture_size()
+        except Exception as exc:
+            self._set_error(f"Failed to read window size: {exc}")
             self.actual_width = width or 640
             self.actual_height = height or 480
 
@@ -110,22 +110,20 @@ class WindowCapturer:
 
         try:
             if not win32gui.IsWindow(self._hwnd):
-                print(f"[WindowCapturer] Window {self._hwnd:#x} no longer exists")
+                self._set_error(f"Window {self._hwnd:#x} no longer exists")
                 self.is_running = False
                 return False, None
 
-            left, top, right, bottom = win32gui.GetClientRect(self._hwnd)
-            w = right - left
-            h = bottom - top
+            w, h = self._get_capture_size()
             if w <= 0 or h <= 0:
-                # Window might be minimized — return last frame
+                self._set_error("Window has no capturable client area; it may be minimized.")
                 if self._last_frame is not None:
                     return True, self._last_frame
                 return False, None
 
             hwnd_dc = win32gui.GetDC(self._hwnd)
             if not hwnd_dc:
-                print("[WindowCapturer] GetDC returned 0")
+                self._set_error("GetDC returned 0")
                 return self._return_last()
 
             mfc_dc = win32ui.CreateDCFromHandle(hwnd_dc)
@@ -135,21 +133,23 @@ class WindowCapturer:
             bitmap.CreateCompatibleBitmap(mfc_dc, w, h)
             save_dc.SelectObject(bitmap)
 
-            save_dc.BitBlt(
-                (0, 0), (w, h), mfc_dc, (0, 0), win32con.SRCCOPY,
-            )
+            if not self._print_window(save_dc):
+                save_dc.BitBlt(
+                    (0, 0), (w, h), mfc_dc, (0, 0), win32con.SRCCOPY,
+                )
 
             bmp_bits = bitmap.GetBitmapBits(False)
             stride = w * 4
             expected_size = stride * h
             if len(bmp_bits) < expected_size:
-                print(f"[WindowCapturer] Bitmap too small: {len(bmp_bits)} < {expected_size}")
+                self._set_error(f"Bitmap too small: {len(bmp_bits)} < {expected_size}")
                 return self._return_last()
 
             frame = np.frombuffer(bmp_bits, dtype=np.uint8)[:expected_size].reshape((h, w, 4))
             bgr = frame[:, :, :3].copy()
 
             self._last_frame = bgr
+            self.last_error = ""
             if w != self.actual_width or h != self.actual_height:
                 self.actual_width = w
                 self.actual_height = h
@@ -159,7 +159,7 @@ class WindowCapturer:
             return True, bgr
 
         except Exception as e:
-            print(f"[WindowCapturer] read error: {e}")
+            self._set_error(f"read error: {e}")
             traceback.print_exc()
             return self._return_last()
 
@@ -197,3 +197,19 @@ class WindowCapturer:
 
     def set_frame_callback(self, callback) -> None:
         self.frame_callback = callback
+
+    def _get_capture_size(self) -> Tuple[int, int]:
+        left, top, right, bottom = win32gui.GetClientRect(self._hwnd)
+        return right - left, bottom - top
+
+    def _print_window(self, save_dc) -> bool:
+        try:
+            # PW_CLIENTONLY | PW_RENDERFULLCONTENT captures more reliably than
+            # BitBlt for several hardware-accelerated Windows applications.
+            return bool(win32gui.PrintWindow(self._hwnd, save_dc.GetSafeHdc(), 3))
+        except Exception:
+            return False
+
+    def _set_error(self, message: str) -> None:
+        self.last_error = message
+        print(f"[WindowCapturer] {message}", flush=True)
