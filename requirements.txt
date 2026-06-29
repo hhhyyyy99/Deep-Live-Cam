@@ -16,3 +16,4 @@ opennsfw2==0.10.2
 protobuf==4.25.1
 pywin32>=306; sys_platform == 'win32'
 pygrabber; sys_platform == 'win32'
+windows-capture>=2.0.0; sys_platform == 'win32'

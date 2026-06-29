@@ -141,7 +141,8 @@ venv\Scripts\activate
 pip install -r requirements.txt
 ```
 For Windows **Window Capture** (built-in, no extra setup needed):
-Window Capture uses `pywin32` (included in requirements.txt) to capture any open window.
+Window Capture uses Windows Graphics Capture (`windows-capture`) for modern
+hardware-accelerated windows such as browsers, with `pywin32` as a fallback.
 
 For Linux:
 ```bash

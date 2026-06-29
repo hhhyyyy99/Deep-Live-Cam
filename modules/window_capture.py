@@ -1,18 +1,19 @@
-"""Window capture via Win32 API (Windows only).
+"""Window capture backends (Windows only).
 
 Provides WindowCapturer with the same start/read/release interface as
 VideoCapturer, so it can be used as a drop-in replacement in the live
 preview pipeline.
 
-Captures the selected window's client area. It first tries PrintWindow/window
-DC capture, then falls back to desktop-composited pixels when the window path
-returns a blank frame. That fallback works better for hardware-accelerated apps
-such as browsers. EnumWindows lists available windows for the picker dialog.
+Captures the selected window's content. Windows Graphics Capture is used first
+because it captures hardware-accelerated apps such as browsers by window handle
+without reading unrelated screen pixels. If that backend is unavailable, the
+legacy pywin32 PrintWindow/window DC path remains as a fallback.
 """
 
 from __future__ import annotations
 
 import sys
+import threading
 import traceback
 from typing import List, Optional, Tuple
 
@@ -79,6 +80,13 @@ class WindowCapturer:
         self.frame_callback = None
         self._last_frame: Optional[np.ndarray] = None
         self.last_error: str = ""
+        self._capture_backend: str = "pywin32"
+        self._wgc_capture = None
+        self._wgc_control = None
+        self._wgc_lock = threading.Lock()
+        self._wgc_frame: Optional[np.ndarray] = None
+        self._wgc_closed = threading.Event()
+        self._wgc_frame_ready = threading.Event()
 
     def start(self, width: int = 0, height: int = 0, fps: int = 30) -> bool:
         if not _IS_WINDOWS:
@@ -97,6 +105,11 @@ class WindowCapturer:
 
         self.actual_fps = float(fps)
         self.is_running = True
+        if self._start_windows_graphics_capture():
+            print(f"[WindowCapturer] Started with Windows Graphics Capture, "
+                  f"hwnd={self._hwnd:#x}", flush=True)
+            return True
+
         print(f"[WindowCapturer] Started, hwnd={self._hwnd:#x}, "
               f"{self.actual_width}x{self.actual_height}", flush=True)
         return True
@@ -104,6 +117,8 @@ class WindowCapturer:
     def read(self) -> Tuple[bool, Optional[np.ndarray]]:
         if not self.is_running:
             return False, None
+        if self._capture_backend == "wgc":
+            return self._read_windows_graphics_capture()
 
         try:
             if not win32gui.IsWindow(self._hwnd):
@@ -119,10 +134,6 @@ class WindowCapturer:
                 return False, None
 
             bgr = self._capture_from_window_dc(w, h)
-            if bgr is None or self._is_probably_blank_frame(bgr):
-                desktop_bgr = self._capture_from_desktop(w, h)
-                if desktop_bgr is not None:
-                    bgr = desktop_bgr
             if bgr is None:
                 return self._return_last()
 
@@ -150,6 +161,7 @@ class WindowCapturer:
     def release(self) -> None:
         self.is_running = False
         self._last_frame = None
+        self._stop_windows_graphics_capture()
 
     def set_frame_callback(self, callback) -> None:
         self.frame_callback = callback
@@ -158,28 +170,79 @@ class WindowCapturer:
         left, top, right, bottom = win32gui.GetClientRect(self._hwnd)
         return right - left, bottom - top
 
-    def _capture_from_desktop(self, w: int, h: int) -> Optional[np.ndarray]:
-        if win32gui.IsIconic(self._hwnd):
-            self._set_error("Window is minimized.")
-            return None
-
-        desktop_dc = None
+    def _start_windows_graphics_capture(self) -> bool:
         try:
-            x, y = win32gui.ClientToScreen(self._hwnd, (0, 0))
-            desktop_dc = win32gui.GetDC(0)
-            if not desktop_dc:
-                self._set_error("Desktop GetDC returned 0")
-                return None
-            return self._copy_dc_region(desktop_dc, w, h, x, y)
+            from windows_capture import WindowsCapture
         except Exception as exc:
-            self._set_error(f"desktop capture failed: {exc}")
-            return None
-        finally:
-            try:
-                if desktop_dc:
-                    win32gui.ReleaseDC(0, desktop_dc)
-            except Exception:
-                pass
+            self._set_error(f"Windows Graphics Capture unavailable: {exc}")
+            return False
+
+        try:
+            capture = WindowsCapture(
+                cursor_capture=False,
+                draw_border=False,
+                monitor_index=None,
+                window_name=None,
+                window_hwnd=int(self._hwnd),
+            )
+
+            @capture.event
+            def on_frame_arrived(frame, _capture_control):
+                bgr = frame.frame_buffer[:, :, :3].copy()
+                with self._wgc_lock:
+                    self._wgc_frame = bgr
+                self._wgc_frame_ready.set()
+
+            @capture.event
+            def on_closed():
+                self._wgc_closed.set()
+
+            self._wgc_capture = capture
+            self._wgc_control = capture.start_free_threaded()
+            self._capture_backend = "wgc"
+            return True
+        except Exception as exc:
+            self._set_error(f"Windows Graphics Capture start failed: {exc}")
+            self._stop_windows_graphics_capture()
+            return False
+
+    def _read_windows_graphics_capture(self) -> Tuple[bool, Optional[np.ndarray]]:
+        if self._wgc_closed.is_set():
+            self._set_error("Windows Graphics Capture session closed.")
+            self.is_running = False
+            return self._return_last()
+
+        if self._wgc_frame is None:
+            self._wgc_frame_ready.wait(timeout=1.0)
+
+        with self._wgc_lock:
+            bgr = None if self._wgc_frame is None else self._wgc_frame.copy()
+        if bgr is None:
+            self._set_error("Windows Graphics Capture returned no frames yet.")
+            return self._return_last()
+
+        self._last_frame = bgr
+        self.last_error = ""
+        self.actual_height, self.actual_width = bgr.shape[:2]
+        if self.frame_callback:
+            self.frame_callback(bgr)
+        return True, bgr
+
+    def _stop_windows_graphics_capture(self) -> None:
+        control = self._wgc_control
+        self._wgc_control = None
+        self._wgc_capture = None
+        self._capture_backend = "pywin32"
+        self._wgc_closed.set()
+        self._wgc_frame_ready.clear()
+        with self._wgc_lock:
+            self._wgc_frame = None
+        if control is None:
+            return
+        try:
+            control.stop()
+        except Exception:
+            pass
 
     def _capture_from_window_dc(self, w: int, h: int) -> Optional[np.ndarray]:
         hwnd_dc = None
@@ -265,12 +328,6 @@ class WindowCapturer:
             frame_data = np.frombuffer(bmp_bits, dtype=np.uint8)
         frame = frame_data[:expected_size].reshape((h, w, 4))
         return frame[:, :, :3].copy()
-
-    def _is_probably_blank_frame(self, bgr: np.ndarray) -> bool:
-        if bgr.size == 0:
-            return True
-        sample = bgr[:: max(1, bgr.shape[0] // 120), :: max(1, bgr.shape[1] // 120)]
-        return float(sample.mean()) < 2.0 and float(sample.std()) < 2.0
 
     def _print_window(self, save_dc) -> bool:
         try:
