@@ -378,7 +378,7 @@ def get_face_swapper() -> Any:
                     )
                 FACE_SWAPPER_MODEL_PATH = model_path
                 # Set up CUDA graph session for faster inference
-                if _HAS_TORCH_CUDA and any(
+                if model_type != MODEL_TYPE_HYPERSWAP and _HAS_TORCH_CUDA and any(
                     p == "CUDAExecutionProvider" or
                     (isinstance(p, tuple) and p[0] == "CUDAExecutionProvider")
                     for p in providers_config

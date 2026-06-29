@@ -33,12 +33,20 @@ cache invalidation, model type detection, and dispatch to a concrete adapter.
 
 ## Hyperswap Adapter Status
 
-`HyperswapSwapper` is currently an explicit adapter placeholder. It prevents
-Hyperswap models from going through the wrong InsightFace loader and emits an
-actionable message pointing to the inspection tool.
+`HyperswapSwapper` implements the inspected `hyperswap_1b_256.onnx` contract:
 
-The next implementation step depends on the actual ONNX input/output contract
-from `tools/inspect_face_swapper_models.py`.
+- `source`: `FLOAT [1, 512]`
+- `target`: `FLOAT [1, 3, 256, 256]`
+- `output`: `FLOAT [1, 3, 256, 256]`
+- `mask`: `FLOAT [1, 1, 256, 256]`
+
+The adapter uses `source_face.normed_embedding` as the source input, aligns the
+target face to a 256x256 FFHQ-style crop, runs ONNX Runtime, applies the model
+mask in aligned space, and returns `(bgr_fake, M)` for the existing paste-back
+path.
+
+The first implementation still needs visual validation in an environment that
+has the actual Hyperswap model file.
 
 ## Compatibility Notes
 

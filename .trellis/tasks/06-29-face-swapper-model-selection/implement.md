@@ -7,29 +7,30 @@
   InsightFace loader.
 - Add `tools/inspect_face_swapper_models.py` to inspect ONNX inputs/outputs.
 - Add tests covering model type detection and Hyperswap dispatch.
+- Implement first-pass `HyperswapSwapper` support for the inspected
+  `source [1,512]` + `target [1,3,256,256]` contract.
 
-## Next Step For Real Hyperswap Support
+## Next Step For Real Hyperswap Validation
 
-1. Run:
+1. In an environment with the actual model, run:
 
    ```bash
    python3 tools/inspect_face_swapper_models.py --model models/hyperswap_1b_256.onnx
    ```
 
-2. Record:
-   - input names, shapes, and dtypes
-   - output names, shapes, and dtypes
-   - opset version
-   - whether additional identity/embedding inputs are required
+2. Confirm the contract still matches:
+   - `source: FLOAT [1, 512]`
+   - `target: FLOAT [1, 3, 256, 256]`
+   - `output: FLOAT [1, 3, 256, 256]`
+   - `mask: FLOAT [1, 1, 256, 256]`
 
-3. Implement `modules.processors.frame.hyperswap_swapper.HyperswapSwapper`:
-   - create an ONNX Runtime session
-   - align source and target faces to the model input size
-   - normalize tensors according to the model contract
-   - run inference
-   - return `(bgr_fake, M)` when `paste_back=False`
+3. Run live/image swap with `hyperswap_1b_256.onnx` selected.
 
-4. Validate with:
+4. If output color or identity is wrong, tune:
+   - source embedding normalization
+   - target normalization range
+   - output range conversion
+   - aligned crop template
 
    ```bash
    python3 -m unittest discover tests
@@ -38,6 +39,6 @@
 
 ## Rollback Point
 
-If Hyperswap adapter implementation proves incompatible with the available
-model files, keep the type detection and inspection script but leave
-`HyperswapSwapper` explicit about the missing adapter contract.
+If visual validation shows the inspected contract is insufficient, keep the
+model type detection and inspection script, then revise `HyperswapSwapper`
+against the actual preprocessing/postprocessing from the model source.

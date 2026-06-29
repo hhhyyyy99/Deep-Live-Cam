@@ -7,6 +7,28 @@ import unittest
 
 
 def _install_import_stubs(model_loads):
+    class _FakeOnnxMeta:
+        def __init__(self, name, shape):
+            self.name = name
+            self.shape = shape
+
+    class _FakeOnnxSession:
+        def __init__(self, path, providers=None):
+            self.path = path
+            self.providers = providers
+
+        def get_inputs(self):
+            return [
+                _FakeOnnxMeta("source", [1, 512]),
+                _FakeOnnxMeta("target", [1, 3, 256, 256]),
+            ]
+
+        def get_outputs(self):
+            return [
+                _FakeOnnxMeta("output", [1, 3, 256, 256]),
+                _FakeOnnxMeta("mask", [1, 1, 256, 256]),
+            ]
+
     sys.modules["cv2"] = types.SimpleNamespace(
         IMREAD_COLOR=1,
         imdecode=lambda *_args, **_kwargs: None,
@@ -38,6 +60,7 @@ def _install_import_stubs(model_loads):
             )
         )
     )
+    sys.modules["onnxruntime"] = types.SimpleNamespace(InferenceSession=_FakeOnnxSession)
     sys.modules["modules.core"] = types.SimpleNamespace(
         update_status=lambda *_args, **_kwargs: None
     )
@@ -189,7 +212,9 @@ class FaceSwapperModelSelectionTests(unittest.TestCase):
 
             face_swapper.set_face_swapper_model("hyperswap_1b_256.onnx")
 
-            self.assertIsNone(face_swapper.get_face_swapper())
+            swapper = face_swapper.get_face_swapper()
+            self.assertIsNotNone(swapper)
+            self.assertEqual(swapper.input_size, (256, 256))
             self.assertEqual(model_loads, [])
 
 
