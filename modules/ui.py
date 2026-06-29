@@ -628,7 +628,7 @@ class MainWindow(QMainWindow):
         card = QGroupBox(_("Options"))
         grid = QGridLayout(card)
         grid.setHorizontalSpacing(20)
-        grid.setVerticalSpacing(6)
+        grid.setVerticalSpacing(10)
 
         def make(field, label, tip):
             sw = _Switch(_(label), getattr(modules.globals, field), _(tip))
@@ -676,7 +676,6 @@ class MainWindow(QMainWindow):
         swapper_label = QLabel(_("Face Swapper Model:"))
         grid.addWidget(swapper_label, row, 0)
 
-        swapper_row = QHBoxLayout()
         self.cb_face_swapper_model = QComboBox()
         self._populate_face_swapper_model_choices(
             getattr(modules.globals, "face_swapper_model", None)
@@ -687,8 +686,15 @@ class MainWindow(QMainWindow):
         self.cb_face_swapper_model.setToolTip(
             _("Select the primary face swapper ONNX model (Auto preserves the default preference)")
         )
-        swapper_row.addWidget(self.cb_face_swapper_model, 1)
+        self.cb_face_swapper_model.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+        grid.addWidget(self.cb_face_swapper_model, row, 1)
+        row += 1
 
+        refresh_row = QHBoxLayout()
+        refresh_row.addStretch(1)
         self.btn_refresh_face_swapper_models = QPushButton(_("Refresh"))
         self.btn_refresh_face_swapper_models.setObjectName("secondary")
         self.btn_refresh_face_swapper_models.setToolTip(
@@ -697,8 +703,8 @@ class MainWindow(QMainWindow):
         self.btn_refresh_face_swapper_models.clicked.connect(
             self._on_refresh_face_swapper_models
         )
-        swapper_row.addWidget(self.btn_refresh_face_swapper_models)
-        grid.addLayout(swapper_row, row, 1)
+        refresh_row.addWidget(self.btn_refresh_face_swapper_models)
+        grid.addLayout(refresh_row, row, 1)
         row += 1
 
         # Face enhancer dropdown
