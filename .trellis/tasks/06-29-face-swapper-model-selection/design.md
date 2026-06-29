@@ -40,10 +40,12 @@ cache invalidation, model type detection, and dispatch to a concrete adapter.
 - `output`: `FLOAT [1, 3, 256, 256]`
 - `mask`: `FLOAT [1, 1, 256, 256]`
 
-The adapter uses `source_face.normed_embedding` as the source input, aligns the
-target face to a 256x256 FFHQ-style crop, runs ONNX Runtime, applies the model
-mask in aligned space, and returns `(bgr_fake, M)` for the existing paste-back
-path.
+The adapter follows FaceFusion's Hyperswap contract: use
+`source_face.embedding_norm` as the source input, align the target face to a
+256x256 `arcface_128` crop, normalize target RGB to `[-1, 1]`, run ONNX
+Runtime, convert output with `output * 0.5 + 0.5`, and return `(bgr_fake, M)`
+for the existing paste-back path. The model `mask` output is currently not used;
+the existing paste-back/masking path owns compositing.
 
 The first implementation still needs visual validation in an environment that
 has the actual Hyperswap model file.

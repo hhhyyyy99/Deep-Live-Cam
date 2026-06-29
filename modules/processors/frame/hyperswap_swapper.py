@@ -11,13 +11,13 @@ import onnxruntime
 from modules.typing import Face, Frame
 
 
-FFHQ_TEMPLATE_512 = np.array(
+ARCFACE_128_TEMPLATE = np.array(
     [
-        [192.98138, 239.94708],
-        [318.90277, 240.19366],
-        [256.63416, 314.01935],
-        [201.26117, 371.41043],
-        [313.08905, 371.15118],
+        [0.36167656, 0.40387734],
+        [0.63696719, 0.40235469],
+        [0.50019687, 0.56044219],
+        [0.38710391, 0.72160547],
+        [0.61507734, 0.72034453],
     ],
     dtype=np.float32,
 )
@@ -87,12 +87,6 @@ class HyperswapSwapper:
         output_map = dict(zip(self.output_names, outputs))
         fake_face = _postprocess_output(output_map[self.output_name])
 
-        mask = None
-        if self.mask_output_name and self.mask_output_name in output_map:
-            mask = _postprocess_mask(output_map[self.mask_output_name])
-        if mask is not None:
-            fake_face = _apply_aligned_mask(fake_face, aligned_target, mask)
-
         if paste_back:
             raise NotImplementedError("HyperswapSwapper only supports paste_back=False")
         return fake_face, affine_matrix
@@ -123,8 +117,13 @@ def _align_target_face(
     if landmarks is None:
         return None, None
 
-    template = FFHQ_TEMPLATE_512 * (input_size / 512.0)
-    affine_matrix, _ = cv2.estimateAffinePartial2D(landmarks, template, method=cv2.LMEDS)
+    template = ARCFACE_128_TEMPLATE * input_size
+    affine_matrix, _ = cv2.estimateAffinePartial2D(
+        landmarks,
+        template,
+        method=cv2.RANSAC,
+        ransacReprojThreshold=100,
+    )
     if affine_matrix is None:
         return None, None
 
@@ -132,23 +131,22 @@ def _align_target_face(
         frame,
         affine_matrix,
         (input_size, input_size),
-        flags=cv2.INTER_LINEAR,
+        flags=cv2.INTER_AREA,
         borderMode=cv2.BORDER_REPLICATE,
     )
     return aligned_face, affine_matrix
 
 
 def _source_embedding(source_face: Face) -> Optional[np.ndarray]:
-    embedding = getattr(source_face, "normed_embedding", None)
+    embedding = getattr(source_face, "embedding_norm", None)
+    if embedding is None:
+        embedding = getattr(source_face, "normed_embedding", None)
     if embedding is None:
         return None
 
     embedding = np.asarray(embedding, dtype=np.float32).reshape(1, -1)
     if embedding.shape[1] != 512:
         return None
-    norm = np.linalg.norm(embedding)
-    if norm > 0:
-        embedding = embedding / norm
     return embedding.astype(np.float32)
 
 
@@ -167,32 +165,7 @@ def _preprocess_target(aligned_target: np.ndarray, input_size: int) -> np.ndarra
 
 def _postprocess_output(output: np.ndarray) -> np.ndarray:
     face = output[0].transpose(1, 2, 0)
-    if np.nanmin(face) < -0.05:
-        face = (face + 1.0) / 2.0
+    face = face * 0.5 + 0.5
     face = np.clip(face, 0.0, 1.0)
     face = (face * 255.0).astype(np.uint8)
     return cv2.cvtColor(face, cv2.COLOR_RGB2BGR)
-
-
-def _postprocess_mask(mask: np.ndarray) -> Optional[np.ndarray]:
-    if mask is None:
-        return None
-    mask = np.squeeze(mask).astype(np.float32)
-    if mask.ndim != 2:
-        return None
-    return np.clip(mask, 0.0, 1.0)
-
-
-def _apply_aligned_mask(
-    fake_face: np.ndarray, aligned_target: np.ndarray, mask: np.ndarray
-) -> np.ndarray:
-    if mask.shape[:2] != fake_face.shape[:2]:
-        mask = cv2.resize(
-            mask,
-            (fake_face.shape[1], fake_face.shape[0]),
-            interpolation=cv2.INTER_LINEAR,
-        )
-    mask_3c = mask[:, :, None]
-    blended = fake_face.astype(np.float32) * mask_3c
-    blended += aligned_target.astype(np.float32) * (1.0 - mask_3c)
-    return np.clip(blended, 0, 255).astype(np.uint8)
