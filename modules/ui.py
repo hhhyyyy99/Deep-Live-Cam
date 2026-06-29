@@ -536,18 +536,7 @@ class MainWindow(QMainWindow):
 
         root = QWidget()
         self.setCentralWidget(root)
-        root_layout = QVBoxLayout(root)
-        root_layout.setContentsMargins(0, 0, 0, 0)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        root_layout.addWidget(scroll)
-
-        content = QWidget()
-        scroll.setWidget(content)
-
-        layout = QVBoxLayout(content)
+        layout = QVBoxLayout(root)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
 
@@ -639,7 +628,7 @@ class MainWindow(QMainWindow):
         card = QGroupBox(_("Options"))
         grid = QGridLayout(card)
         grid.setHorizontalSpacing(20)
-        grid.setVerticalSpacing(10)
+        grid.setVerticalSpacing(6)
 
         def make(field, label, tip):
             sw = _Switch(_(label), getattr(modules.globals, field), _(tip))
@@ -671,7 +660,7 @@ class MainWindow(QMainWindow):
                                     _("Manually assign which source face maps to which target face"))
         self.sw_map_faces.toggled.connect(self._on_map_faces_toggled)
 
-        # Keep switches in one readable column; the main window scrolls if needed.
+        # Layout: 2 columns of switches
         items = [
             self.sw_keep_fps, self.sw_keep_audio,
             self.sw_keep_frames, self.sw_many_faces,
@@ -679,14 +668,15 @@ class MainWindow(QMainWindow):
             self.sw_poisson, self.sw_color_fix,
         ]
         for i, w in enumerate(items):
-            grid.addWidget(w, i, 0, 1, 2)
+            grid.addWidget(w, i // 2, i % 2)
 
-        row = len(items)
+        row = len(items) // 2
 
         # Primary face swapper model dropdown
         swapper_label = QLabel(_("Face Swapper Model:"))
         grid.addWidget(swapper_label, row, 0)
 
+        swapper_row = QHBoxLayout()
         self.cb_face_swapper_model = QComboBox()
         self._populate_face_swapper_model_choices(
             getattr(modules.globals, "face_swapper_model", None)
@@ -697,15 +687,8 @@ class MainWindow(QMainWindow):
         self.cb_face_swapper_model.setToolTip(
             _("Select the primary face swapper ONNX model (Auto preserves the default preference)")
         )
-        self.cb_face_swapper_model.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Fixed,
-        )
-        grid.addWidget(self.cb_face_swapper_model, row, 1)
-        row += 1
+        swapper_row.addWidget(self.cb_face_swapper_model, 1)
 
-        refresh_row = QHBoxLayout()
-        refresh_row.addStretch(1)
         self.btn_refresh_face_swapper_models = QPushButton(_("Refresh"))
         self.btn_refresh_face_swapper_models.setObjectName("secondary")
         self.btn_refresh_face_swapper_models.setToolTip(
@@ -714,8 +697,8 @@ class MainWindow(QMainWindow):
         self.btn_refresh_face_swapper_models.clicked.connect(
             self._on_refresh_face_swapper_models
         )
-        refresh_row.addWidget(self.btn_refresh_face_swapper_models)
-        grid.addLayout(refresh_row, row, 1)
+        swapper_row.addWidget(self.btn_refresh_face_swapper_models)
+        grid.addLayout(swapper_row, row, 1)
         row += 1
 
         # Face enhancer dropdown
