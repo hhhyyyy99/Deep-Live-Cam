@@ -125,6 +125,22 @@ class FaceSwapperModelSelectionTests(unittest.TestCase):
             face_swapper._HAS_TORCH_CUDA = False
             self.assertEqual(face_swapper.resolve_face_swapper_model_path(), fp32_path)
 
+    def test_detects_hyperswap_model_type(self):
+        face_swapper = _load_face_swapper([])
+
+        self.assertEqual(
+            face_swapper.detect_face_swapper_model_type("inswapper_128.onnx"),
+            face_swapper.MODEL_TYPE_INSWAPPER,
+        )
+        self.assertEqual(
+            face_swapper.detect_face_swapper_model_type("hyperswap_1b_256.onnx"),
+            face_swapper.MODEL_TYPE_HYPERSWAP,
+        )
+        self.assertEqual(
+            face_swapper.detect_face_swapper_model_type("custom_swapper.onnx"),
+            face_swapper.MODEL_TYPE_UNKNOWN,
+        )
+
     def test_selected_model_path_must_exist(self):
         face_swapper = _load_face_swapper([])
         with tempfile.TemporaryDirectory() as models_dir:
@@ -162,6 +178,19 @@ class FaceSwapperModelSelectionTests(unittest.TestCase):
             second_model = face_swapper.get_face_swapper()
             self.assertIsNotNone(second_model)
             self.assertEqual([load[0] for load in model_loads], [first_path, second_path])
+
+    def test_hyperswap_uses_dedicated_adapter_path(self):
+        model_loads = []
+        face_swapper = _load_face_swapper(model_loads)
+        with tempfile.TemporaryDirectory() as models_dir:
+            model_path = os.path.join(models_dir, "hyperswap_1b_256.onnx")
+            open(model_path, "w").close()
+            face_swapper.models_dir = models_dir
+
+            face_swapper.set_face_swapper_model("hyperswap_1b_256.onnx")
+
+            self.assertIsNone(face_swapper.get_face_swapper())
+            self.assertEqual(model_loads, [])
 
 
 if __name__ == "__main__":

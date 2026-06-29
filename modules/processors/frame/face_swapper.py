@@ -27,6 +27,9 @@ FACE_SWAPPER_MODEL_PATH = None
 THREAD_LOCK = threading.Lock()
 NAME = "DLC.FACE-SWAPPER"
 AUTO_FACE_SWAPPER_MODEL = "Auto"
+MODEL_TYPE_INSWAPPER = "inswapper"
+MODEL_TYPE_HYPERSWAP = "hyperswap"
+MODEL_TYPE_UNKNOWN = "unknown"
 NON_SWAPPER_MODEL_KEYWORDS = (
     "gfpgan",
     "gpen",
@@ -239,6 +242,15 @@ def list_face_swapper_models() -> List[str]:
     return sorted(models, key=str.lower)
 
 
+def detect_face_swapper_model_type(model_path: str) -> str:
+    file_name = os.path.basename(model_path).lower()
+    if file_name.startswith("inswapper"):
+        return MODEL_TYPE_INSWAPPER
+    if file_name.startswith("hyperswap"):
+        return MODEL_TYPE_HYPERSWAP
+    return MODEL_TYPE_UNKNOWN
+
+
 def normalize_face_swapper_model(model_name: Optional[str]) -> Optional[str]:
     """Normalize persisted/UI model values to a safe model file name."""
     if not model_name or model_name == AUTO_FACE_SWAPPER_MODEL:
@@ -355,10 +367,15 @@ def get_face_swapper() -> Any:
                         providers_config.append(p)
                     else:
                         providers_config.append(p)
-                FACE_SWAPPER = insightface.model_zoo.get_model(
-                    model_path,
-                    providers=providers_config,
-                )
+                model_type = detect_face_swapper_model_type(model_path)
+                if model_type == MODEL_TYPE_HYPERSWAP:
+                    from modules.processors.frame.hyperswap_swapper import HyperswapSwapper
+                    FACE_SWAPPER = HyperswapSwapper(model_path, providers_config)
+                else:
+                    FACE_SWAPPER = insightface.model_zoo.get_model(
+                        model_path,
+                        providers=providers_config,
+                    )
                 FACE_SWAPPER_MODEL_PATH = model_path
                 # Set up CUDA graph session for faster inference
                 if _HAS_TORCH_CUDA and any(
