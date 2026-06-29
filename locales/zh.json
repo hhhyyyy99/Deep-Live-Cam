@@ -49,5 +49,8 @@
     "Window Capture Preview": "窗口捕获预览",
     "Live": "直播",
     "Camera:": "摄像头:",
-    "Face Enhancer:": "面部增强器:"
+    "Face Enhancer:": "面部增强器:",
+    "Preview size:": "预览尺寸:",
+    "Default preview window width": "默认预览窗口宽度",
+    "Default preview window height": "默认预览窗口高度"
 }

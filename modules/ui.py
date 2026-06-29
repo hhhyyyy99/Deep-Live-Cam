@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSlider,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -106,6 +107,31 @@ POPUP_LIVE_SCROLL_HEIGHT = 700
 
 MAPPER_PREVIEW_SIZE = 100
 SOURCE_TARGET_PREVIEW_SIZE = 200
+
+
+def _coerce_preview_dimension(value, default: int, minimum: int, maximum: int) -> int:
+    try:
+        size = int(value)
+    except (TypeError, ValueError):
+        size = default
+    return max(minimum, min(maximum, size))
+
+
+def _preview_default_size() -> Tuple[int, int]:
+    return (
+        _coerce_preview_dimension(
+            getattr(modules.globals, "preview_default_width", PREVIEW_DEFAULT_WIDTH),
+            PREVIEW_DEFAULT_WIDTH,
+            320,
+            PREVIEW_MAX_WIDTH,
+        ),
+        _coerce_preview_dimension(
+            getattr(modules.globals, "preview_default_height", PREVIEW_DEFAULT_HEIGHT),
+            PREVIEW_DEFAULT_HEIGHT,
+            180,
+            PREVIEW_MAX_HEIGHT,
+        ),
+    )
 
 
 # ─── modern dark stylesheet ───────────────────────────────────────────────
@@ -195,6 +221,17 @@ QSlider::sub-page:horizontal {
     background: #2d6cdf;
     border-radius: 3px;
 }
+
+QSpinBox {
+    background-color: #2a2a2a;
+    color: #e6e6e6;
+    border: 1px solid #404040;
+    border-radius: 6px;
+    padding: 5px 8px;
+    selection-background-color: #2d6cdf;
+    selection-color: #ffffff;
+}
+QSpinBox:hover { border-color: #2d6cdf; }
 
 QLabel#imageDrop {
     background-color: #2a2a2a;
@@ -318,6 +355,8 @@ def save_switch_states():
         "live_resizable": modules.globals.live_resizable,
         "fp_ui": modules.globals.fp_ui,
         "show_fps": modules.globals.show_fps,
+        "preview_default_width": modules.globals.preview_default_width,
+        "preview_default_height": modules.globals.preview_default_height,
         "mouth_mask": modules.globals.mouth_mask,
         "show_mouth_mask_box": modules.globals.show_mouth_mask_box,
         "mouth_mask_size": modules.globals.mouth_mask_size,
@@ -345,6 +384,18 @@ def load_switch_states():
         modules.globals.live_resizable = state.get("live_resizable", False)
         modules.globals.fp_ui = state.get("fp_ui", {"face_enhancer": False})
         modules.globals.show_fps = state.get("show_fps", False)
+        modules.globals.preview_default_width = _coerce_preview_dimension(
+            state.get("preview_default_width", PREVIEW_DEFAULT_WIDTH),
+            PREVIEW_DEFAULT_WIDTH,
+            320,
+            PREVIEW_MAX_WIDTH,
+        )
+        modules.globals.preview_default_height = _coerce_preview_dimension(
+            state.get("preview_default_height", PREVIEW_DEFAULT_HEIGHT),
+            PREVIEW_DEFAULT_HEIGHT,
+            180,
+            PREVIEW_MAX_HEIGHT,
+        )
         # Mouth mask always starts disabled (slider at 0) on launch,
         # regardless of the persisted value — enable it explicitly each session.
         modules.globals.mouth_mask_size = 0.0
@@ -705,10 +756,11 @@ class MainWindow(QMainWindow):
 
     def _build_camera_card(self) -> QGroupBox:
         card = QGroupBox(_("Live"))
-        layout = QHBoxLayout(card)
+        layout = QVBoxLayout(card)
+        camera_row = QHBoxLayout()
 
         # Camera section
-        layout.addWidget(QLabel(_("Camera:")))
+        camera_row.addWidget(QLabel(_("Camera:")))
         self._camera_indices, self._camera_names = get_available_cameras()
 
         self.cb_camera = QComboBox()
@@ -720,18 +772,18 @@ class MainWindow(QMainWindow):
             self.cb_camera.addItems(self._camera_names)
             cam_ok = True
         self.cb_camera.setToolTip(_("Select which camera to use for live mode"))
-        layout.addWidget(self.cb_camera, 1)
+        camera_row.addWidget(self.cb_camera, 1)
 
         self.btn_live = QPushButton(_("Live"))
         self.btn_live.setEnabled(cam_ok)
         self.btn_live.setToolTip(_("Start real-time face swap using webcam"))
         self.btn_live.clicked.connect(self._on_live)
-        layout.addWidget(self.btn_live)
+        camera_row.addWidget(self.btn_live)
 
         # Separator
         sep = QLabel("|")
         sep.setStyleSheet("color: #555; padding: 0 4px;")
-        layout.addWidget(sep)
+        camera_row.addWidget(sep)
 
         # Window capture section
         self.btn_window_capture = QPushButton(_("Window Capture"))
@@ -739,7 +791,33 @@ class MainWindow(QMainWindow):
             _("Select an open window to capture for real-time face swap")
         )
         self.btn_window_capture.clicked.connect(self._on_window_capture)
-        layout.addWidget(self.btn_window_capture)
+        camera_row.addWidget(self.btn_window_capture)
+        layout.addLayout(camera_row)
+
+        size_row = QHBoxLayout()
+        size_row.addWidget(QLabel(_("Preview size:")))
+        width, height = _preview_default_size()
+        self.spin_preview_width = QSpinBox()
+        self.spin_preview_width.setRange(320, PREVIEW_MAX_WIDTH)
+        self.spin_preview_width.setSingleStep(20)
+        self.spin_preview_width.setValue(width)
+        self.spin_preview_width.setSuffix(" px")
+        self.spin_preview_width.setToolTip(_("Default preview window width"))
+
+        self.spin_preview_height = QSpinBox()
+        self.spin_preview_height.setRange(180, PREVIEW_MAX_HEIGHT)
+        self.spin_preview_height.setSingleStep(20)
+        self.spin_preview_height.setValue(height)
+        self.spin_preview_height.setSuffix(" px")
+        self.spin_preview_height.setToolTip(_("Default preview window height"))
+
+        self.spin_preview_width.valueChanged.connect(self._on_preview_size_changed)
+        self.spin_preview_height.valueChanged.connect(self._on_preview_size_changed)
+        size_row.addWidget(self.spin_preview_width)
+        size_row.addWidget(QLabel("x"))
+        size_row.addWidget(self.spin_preview_height)
+        size_row.addStretch(1)
+        layout.addLayout(size_row)
 
         return card
 
@@ -850,6 +928,11 @@ class MainWindow(QMainWindow):
         selected = key_map.get(choice)
         if selected:
             _update_tumbler(selected, True)
+        save_switch_states()
+
+    def _on_preview_size_changed(self) -> None:
+        modules.globals.preview_default_width = self.spin_preview_width.value()
+        modules.globals.preview_default_height = self.spin_preview_height.value()
         save_switch_states()
 
     def _on_transparency_change(self, value: float) -> None:
@@ -1075,7 +1158,8 @@ class PreviewWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(_("Preview"))
-        self.resize(PREVIEW_DEFAULT_WIDTH, PREVIEW_DEFAULT_HEIGHT)
+        default_width, default_height = _preview_default_size()
+        self.resize(default_width, default_height)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
@@ -1112,8 +1196,9 @@ class PreviewWindow(QWidget):
             )
         # Fit to current widget size while preserving aspect ratio.
         h, w = temp_frame.shape[:2]
-        bound_w = min(PREVIEW_MAX_WIDTH, max(self.width(), PREVIEW_DEFAULT_WIDTH))
-        bound_h = min(PREVIEW_MAX_HEIGHT, max(self.height(), PREVIEW_DEFAULT_HEIGHT))
+        default_width, default_height = _preview_default_size()
+        bound_w = min(PREVIEW_MAX_WIDTH, max(self.width(), default_width))
+        bound_h = min(PREVIEW_MAX_HEIGHT, max(self.height(), default_height))
         ratio = min(bound_w / w, bound_h / h)
         new_size = (max(1, int(w * ratio)), max(1, int(h * ratio)))
         temp_frame = cv2.resize(temp_frame, new_size, interpolation=cv2.INTER_LANCZOS4)
@@ -1305,7 +1390,8 @@ class WebcamPreviewWindow(QWidget):
                  initial_frame: Optional[np.ndarray] = None):
         super().__init__()
         self.setWindowTitle("Live Preview")
-        self.resize(PREVIEW_DEFAULT_WIDTH, PREVIEW_DEFAULT_HEIGHT)
+        default_width, default_height = _preview_default_size()
+        self.resize(default_width, default_height)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self._image_label = QLabel()
@@ -1314,7 +1400,7 @@ class WebcamPreviewWindow(QWidget):
         layout.addWidget(self._image_label, 1)
         if initial_frame is not None:
             preview_frame = fit_image_to_size(
-                initial_frame, PREVIEW_DEFAULT_WIDTH, PREVIEW_DEFAULT_HEIGHT
+                initial_frame, default_width, default_height
             )
             self._image_label.setPixmap(_bgr_to_qpixmap(preview_frame))
 
@@ -1327,7 +1413,7 @@ class WebcamPreviewWindow(QWidget):
                 return
         else:
             self._cap = VideoCapturer(camera_index)
-            if not self._cap.start(PREVIEW_DEFAULT_WIDTH, PREVIEW_DEFAULT_HEIGHT, 60):
+            if not self._cap.start(default_width, default_height, 60):
                 update_status("Failed to start camera")
                 QTimer.singleShot(0, self.close)
                 return

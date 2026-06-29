@@ -41,6 +41,8 @@ live_resizable: bool = True
 camera_input_combobox: Any | None = None # Placeholder for UI element if needed
 webcam_preview_running: bool = False
 show_fps: bool = False
+preview_default_width: int = 640
+preview_default_height: int = 360
 
 # System Configuration
 max_memory: int | None = None        # Memory limit in GB? (Needs clarification)
