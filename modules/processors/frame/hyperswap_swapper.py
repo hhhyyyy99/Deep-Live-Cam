@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any, List, Optional, Tuple
 
 import cv2
@@ -26,6 +27,8 @@ ARCFACE_128_TEMPLATE = np.array(
 class HyperswapSwapper:
     """Expose Hyperswap as an INSwapper-like ``get(...)`` object."""
 
+    use_crop_paste_back = True
+
     def __init__(self, model_path: str, providers: List[Any]):
         self.model_path = model_path
         self.session = onnxruntime.InferenceSession(model_path, providers=providers)
@@ -37,6 +40,7 @@ class HyperswapSwapper:
         self.mask_output_name = self._find_output_name("mask", fallback_index=1)
         target_size = self._infer_target_size() or 256
         self.input_size = (target_size, target_size)
+        self._last_stats_log = 0.0
 
     def _find_input_name(self, expected: str, fallback_index: int) -> str:
         for name in self.input_names:
@@ -86,6 +90,7 @@ class HyperswapSwapper:
         )
         output_map = dict(zip(self.output_names, outputs))
         fake_face = _postprocess_output(output_map[self.output_name])
+        _log_low_change_output(self, fake_face, aligned_target, source)
 
         if paste_back:
             raise NotImplementedError("HyperswapSwapper only supports paste_back=False")
@@ -169,3 +174,35 @@ def _postprocess_output(output: np.ndarray) -> np.ndarray:
     face = np.clip(face, 0.0, 1.0)
     face = (face * 255.0).astype(np.uint8)
     return cv2.cvtColor(face, cv2.COLOR_RGB2BGR)
+
+
+def _log_low_change_output(
+    swapper: HyperswapSwapper,
+    fake_face: np.ndarray,
+    aligned_target: np.ndarray,
+    source: np.ndarray,
+) -> None:
+    """Print a rate-limited hint when the model output is almost unchanged."""
+    now = time.monotonic()
+    if now - swapper._last_stats_log < 10.0:
+        return
+    swapper._last_stats_log = now
+
+    mean_abs_diff = float(
+        np.mean(
+            np.abs(
+                fake_face.astype(np.float32) - aligned_target.astype(np.float32)
+            )
+        )
+    )
+    if mean_abs_diff >= 2.0:
+        return
+
+    source_norm = float(np.linalg.norm(source))
+    output_min = int(fake_face.min())
+    output_max = int(fake_face.max())
+    print(
+        "[DLC.FACE-SWAPPER] Hyperswap output is nearly unchanged "
+        f"(mean_abs_diff={mean_abs_diff:.3f}, source_norm={source_norm:.3f}, "
+        f"output_range={output_min}-{output_max})."
+    )

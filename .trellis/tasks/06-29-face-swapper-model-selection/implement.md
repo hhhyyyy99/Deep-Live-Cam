@@ -9,6 +9,10 @@
 - Add tests covering model type detection and Hyperswap dispatch.
 - Implement first-pass `HyperswapSwapper` support for the inspected
   `source [1,512]` + `target [1,3,256,256]` contract.
+- Route Hyperswap through a FaceFusion-style crop-mask paste-back path instead
+  of the INSwapper ellipse paste-back path.
+- Add low-frequency diagnostics for Hyperswap outputs that are almost identical
+  to the aligned target crop.
 
 ## Next Step For Real Hyperswap Validation
 
@@ -31,6 +35,7 @@
    - target normalization range
    - output range conversion
    - aligned crop template
+   - crop paste-back mask shape/blur
 
    ```bash
    python3 -m unittest discover tests

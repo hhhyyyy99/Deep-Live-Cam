@@ -43,12 +43,18 @@ cache invalidation, model type detection, and dispatch to a concrete adapter.
 The adapter follows FaceFusion's Hyperswap contract: use
 `source_face.embedding_norm` as the source input, align the target face to a
 256x256 `arcface_128` crop, normalize target RGB to `[-1, 1]`, run ONNX
-Runtime, convert output with `output * 0.5 + 0.5`, and return `(bgr_fake, M)`
-for the existing paste-back path. The model `mask` output is currently not used;
-the existing paste-back/masking path owns compositing.
+Runtime, and convert output with `output * 0.5 + 0.5`. The model `mask` output
+is currently not used; FaceFusion also ignores it for Hyperswap.
 
-The first implementation still needs visual validation in an environment that
-has the actual Hyperswap model file.
+Hyperswap must not reuse INSwapper's center-ellipse paste-back path. Hyperswap
+outputs a wider 256x256 crop, so it declares `use_crop_paste_back = True` and
+`swap_face()` pastes it back through a FaceFusion-style soft crop mask with the
+inverse affine matrix. This keeps INSwapper on the optimized ellipse path while
+making crop-based swappers visibly composite their full usable output.
+
+The adapter logs a low-frequency diagnostic when the Hyperswap output is almost
+identical to the aligned target crop. That separates model/input failures from
+paste-back failures during real-model validation.
 
 ## Compatibility Notes
 

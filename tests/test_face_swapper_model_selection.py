@@ -215,6 +215,7 @@ class FaceSwapperModelSelectionTests(unittest.TestCase):
             swapper = face_swapper.get_face_swapper()
             self.assertIsNotNone(swapper)
             self.assertEqual(swapper.input_size, (256, 256))
+            self.assertTrue(swapper.use_crop_paste_back)
             self.assertEqual(model_loads, [])
 
 
