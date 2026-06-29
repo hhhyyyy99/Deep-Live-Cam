@@ -27,9 +27,6 @@ FACE_SWAPPER_MODEL_PATH = None
 THREAD_LOCK = threading.Lock()
 NAME = "DLC.FACE-SWAPPER"
 AUTO_FACE_SWAPPER_MODEL = "Auto"
-MODEL_TYPE_INSWAPPER = "inswapper"
-MODEL_TYPE_HYPERSWAP = "hyperswap"
-MODEL_TYPE_UNKNOWN = "unknown"
 NON_SWAPPER_MODEL_KEYWORDS = (
     "gfpgan",
     "gpen",
@@ -242,15 +239,6 @@ def list_face_swapper_models() -> List[str]:
     return sorted(models, key=str.lower)
 
 
-def detect_face_swapper_model_type(model_path: str) -> str:
-    file_name = os.path.basename(model_path).lower()
-    if file_name.startswith("inswapper"):
-        return MODEL_TYPE_INSWAPPER
-    if file_name.startswith("hyperswap"):
-        return MODEL_TYPE_HYPERSWAP
-    return MODEL_TYPE_UNKNOWN
-
-
 def normalize_face_swapper_model(model_name: Optional[str]) -> Optional[str]:
     """Normalize persisted/UI model values to a safe model file name."""
     if not model_name or model_name == AUTO_FACE_SWAPPER_MODEL:
@@ -367,18 +355,13 @@ def get_face_swapper() -> Any:
                         providers_config.append(p)
                     else:
                         providers_config.append(p)
-                model_type = detect_face_swapper_model_type(model_path)
-                if model_type == MODEL_TYPE_HYPERSWAP:
-                    from modules.processors.frame.hyperswap_swapper import HyperswapSwapper
-                    FACE_SWAPPER = HyperswapSwapper(model_path, providers_config)
-                else:
-                    FACE_SWAPPER = insightface.model_zoo.get_model(
-                        model_path,
-                        providers=providers_config,
-                    )
+                FACE_SWAPPER = insightface.model_zoo.get_model(
+                    model_path,
+                    providers=providers_config,
+                )
                 FACE_SWAPPER_MODEL_PATH = model_path
                 # Set up CUDA graph session for faster inference
-                if model_type != MODEL_TYPE_HYPERSWAP and _HAS_TORCH_CUDA and any(
+                if _HAS_TORCH_CUDA and any(
                     p == "CUDAExecutionProvider" or
                     (isinstance(p, tuple) and p[0] == "CUDAExecutionProvider")
                     for p in providers_config
@@ -405,8 +388,6 @@ except ImportError:
 _paste_cache = {
     'soft_alpha': None,  # feathered alpha mask in aligned-face space
     'alpha_size': 0,
-    'crop_box_alpha': None,
-    'crop_box_alpha_size': 0,
 }
 
 
@@ -434,25 +415,6 @@ def _get_soft_alpha(size: int) -> np.ndarray:
         _paste_cache['soft_alpha'] = mask  # uint8 [0, 255] — blended via cv2 SIMD ops
         _paste_cache['alpha_size'] = size
     return _paste_cache['soft_alpha']
-
-
-def _get_crop_box_alpha(size: int) -> np.ndarray:
-    """FaceFusion-style box mask in aligned crop space for 256px swappers."""
-    if _paste_cache['crop_box_alpha_size'] != size:
-        blur_amount = int(size * 0.5 * 0.3)
-        blur_area = max(blur_amount // 2, 1)
-        mask = np.ones((size, size), dtype=np.float32)
-        mask[:blur_area, :] = 0
-        mask[-blur_area:, :] = 0
-        mask[:, :blur_area] = 0
-        mask[:, -blur_area:] = 0
-
-        if blur_amount > 0:
-            mask = cv2.GaussianBlur(mask, (0, 0), blur_amount * 0.25)
-
-        _paste_cache['crop_box_alpha'] = mask.clip(0, 1)
-        _paste_cache['crop_box_alpha_size'] = size
-    return _paste_cache['crop_box_alpha']
 
 # CUDA graph swap session cache
 _cuda_graph_session = {
@@ -631,66 +593,6 @@ def _fast_paste_back(target_img: Frame, bgr_fake: np.ndarray, aimg: np.ndarray, 
     return target_img
 
 
-def _crop_paste_back(target_img: Frame, bgr_fake: np.ndarray, M: np.ndarray) -> Frame:
-    """Paste a full swapper crop back with a soft crop mask.
-
-    Hyperswap follows FaceFusion's swapper contract and produces a 256x256 crop
-    whose usable region is wider than INSwapper's central ellipse. Reusing the
-    INSwapper alpha can make a valid Hyperswap output look like no swap
-    happened, so this path mirrors FaceFusion's inverse-affine crop paste.
-    """
-    h, w = target_img.shape[:2]
-    crop_h, crop_w = bgr_fake.shape[:2]
-    if crop_h != crop_w:
-        return target_img
-
-    IM = cv2.invertAffineTransform(M)
-    corners = np.array(
-        [[0, 0], [crop_w, 0], [crop_w, crop_h], [0, crop_h]], dtype=np.float32
-    )
-    transformed = (IM[:, :2] @ corners.T).T + IM[:, 2]
-    x1 = int(np.floor(transformed[:, 0].min()))
-    x2 = int(np.ceil(transformed[:, 0].max()))
-    y1 = int(np.floor(transformed[:, 1].min()))
-    y2 = int(np.ceil(transformed[:, 1].max()))
-
-    x1, y1 = np.clip([x1, y1], 0, [w, h])
-    x2, y2 = np.clip([x2, y2], 0, [w, h])
-    paste_w, paste_h = int(x2 - x1), int(y2 - y1)
-    if paste_w <= 0 or paste_h <= 0:
-        return target_img
-
-    paste_matrix = IM.copy()
-    paste_matrix[0, 2] -= x1
-    paste_matrix[1, 2] -= y1
-
-    crop_alpha = _get_crop_box_alpha(crop_h)
-    alpha = cv2.warpAffine(
-        crop_alpha,
-        paste_matrix,
-        (paste_w, paste_h),
-        flags=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=0,
-    ).clip(0, 1)
-    pasted_crop = cv2.warpAffine(
-        bgr_fake,
-        paste_matrix,
-        (paste_w, paste_h),
-        flags=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_REPLICATE,
-    )
-
-    target_crop = target_img[y1:y2, x1:x2]
-    alpha_3c = alpha[:, :, None].astype(np.float32)
-    blended = (
-        pasted_crop.astype(np.float32) * alpha_3c
-        + target_crop.astype(np.float32) * (1.0 - alpha_3c)
-    )
-    target_img[y1:y2, x1:x2] = np.clip(blended, 0, 255).astype(target_img.dtype)
-    return target_img
-
-
 def swap_face(source_face: Face, target_face: Face, temp_frame: Frame) -> Frame:
     """Optimized face swapping with better memory management and performance."""
     face_swapper = get_face_swapper()
@@ -744,14 +646,12 @@ def swap_face(source_face: Face, target_face: Face, temp_frame: Frame) -> Frame:
         if not isinstance(bgr_fake, np.ndarray):
             return original_frame
 
-        if getattr(face_swapper, "use_crop_paste_back", False):
-            swapped_frame = _crop_paste_back(temp_frame, bgr_fake, M)
-        else:
-            # Pass a dummy aimg with correct shape — _fast_paste_back only uses
-            # aimg.shape to create the mask. Avoids redundant norm_crop2 (~0.6ms).
-            _face_size = face_swapper.input_size[0]
-            _aimg_dummy = np.empty((_face_size, _face_size, 3), dtype=np.uint8)
-            swapped_frame = _fast_paste_back(temp_frame, bgr_fake, _aimg_dummy, M)
+        # Pass a dummy aimg with correct shape — _fast_paste_back only uses aimg.shape
+        # to create the white mask. Avoids redundant norm_crop2 (~0.6ms).
+        _face_size = face_swapper.input_size[0]
+        _aimg_dummy = np.empty((_face_size, _face_size, 3), dtype=np.uint8)
+
+        swapped_frame = _fast_paste_back(temp_frame, bgr_fake, _aimg_dummy, M)
 
     except Exception as e:
         print(f"Error during face swap: {e}")

@@ -7,7 +7,6 @@ Allow users to choose the primary face swapper ONNX model from inside the deskto
 ## User Value
 
 - Users can compare compatible swapper model variants without renaming files or editing code.
-- Users can eventually run non-InsightFace swapper families such as Hyperswap when a dedicated adapter exists.
 - The current default behavior remains available for users who do not need model selection.
 - The feature is visible in the same app surface as existing face processing controls.
 
@@ -32,8 +31,6 @@ Allow users to choose the primary face swapper ONNX model from inside the deskto
 - Limit the selection to files that are intended to be compatible primary face swapper ONNX models; face enhancer and detector models must not appear as primary swapper choices.
 - Store the selected model in application state so live webcam, window capture, image processing, and video processing use the same selected swapper.
 - Reload the cached face swapper when the selected model changes.
-- Detect model family before loading so non-INSwapper models can route to dedicated adapters instead of the InsightFace loader.
-- Provide an inspection path for ONNX models whose preprocessing/inference contract is not yet known.
 - Support hot model switching while a live preview is running: the current preview should keep running, the cached swapper should be invalidated, and the next swap should load the newly selected model. A short loading pause is acceptable.
 - Validate that the selected model file exists before processing starts.
 - Show a clear status/error message when the selected model is missing or fails to load.
@@ -46,9 +43,6 @@ Allow users to choose the primary face swapper ONNX model from inside the deskto
 - [ ] Compatible swapper model files currently present in `models/` are available as selectable choices.
 - [ ] The user can refresh the selector so the list matches the current `models/` directory contents.
 - [ ] Choosing a model causes subsequent swap operations to load and use that exact model path.
-- [ ] Hyperswap-family models are identified separately from INSwapper models.
-- [ ] Hyperswap-family models do not go through the InsightFace `model_zoo` loader.
-- [ ] A local inspection tool can report ONNX input/output contracts for models in `models/`.
 - [ ] Changing the selection invalidates the cached `FACE_SWAPPER` instance so the old model is not reused.
 - [ ] Changing the selection during a running live preview applies to subsequent frames without requiring the preview window to be closed and reopened.
 - [ ] Missing selected model files block processing with an actionable status message.
@@ -62,6 +56,7 @@ Allow users to choose the primary face swapper ONNX model from inside the deskto
 ## Out Of Scope
 
 - Adding or training new face swapper models.
+- Supporting arbitrary ONNX model architectures that `insightface.model_zoo.get_model()` cannot load as a face swapper.
 - Changing face enhancer model selection.
 - Mobile screen capture / LAN streaming work.
 
