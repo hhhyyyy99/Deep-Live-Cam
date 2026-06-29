@@ -82,8 +82,10 @@ class FaceSwapperModelSelectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as models_dir:
             for file_name in (
                 "inswapper_128.onnx",
+                "inswapper_custom.onnx",
                 "custom_swapper.onnx",
                 "custom_model.onnx",
+                "hyperswap_1c_256.onnx",
                 "gfpgan-1024.onnx",
                 "gpen_bfr_512.onnx",
                 "det_10g.onnx",
@@ -94,7 +96,7 @@ class FaceSwapperModelSelectionTests(unittest.TestCase):
 
             self.assertEqual(
                 face_swapper.list_face_swapper_models(),
-                ["custom_model.onnx", "custom_swapper.onnx", "inswapper_128.onnx"],
+                ["inswapper_128.onnx", "inswapper_custom.onnx"],
             )
 
     def test_model_list_reflects_current_models_directory(self):
@@ -104,10 +106,10 @@ class FaceSwapperModelSelectionTests(unittest.TestCase):
 
             self.assertEqual(face_swapper.list_face_swapper_models(), [])
 
-            open(os.path.join(models_dir, "new_swapper.onnx"), "w").close()
-            self.assertEqual(face_swapper.list_face_swapper_models(), ["new_swapper.onnx"])
+            open(os.path.join(models_dir, "inswapper_new.onnx"), "w").close()
+            self.assertEqual(face_swapper.list_face_swapper_models(), ["inswapper_new.onnx"])
 
-            os.remove(os.path.join(models_dir, "new_swapper.onnx"))
+            os.remove(os.path.join(models_dir, "inswapper_new.onnx"))
             self.assertEqual(face_swapper.list_face_swapper_models(), [])
 
     def test_auto_selection_preserves_existing_fp16_then_fp32_preference(self):
@@ -128,27 +130,38 @@ class FaceSwapperModelSelectionTests(unittest.TestCase):
     def test_selected_model_path_must_exist(self):
         face_swapper = _load_face_swapper([])
         with tempfile.TemporaryDirectory() as models_dir:
-            model_path = os.path.join(models_dir, "custom_swapper.onnx")
+            model_path = os.path.join(models_dir, "inswapper_custom.onnx")
             open(model_path, "w").close()
             face_swapper.models_dir = models_dir
 
-            face_swapper.modules.globals.face_swapper_model = "custom_swapper.onnx"
+            face_swapper.modules.globals.face_swapper_model = "inswapper_custom.onnx"
             self.assertEqual(face_swapper.resolve_face_swapper_model_path(), model_path)
 
-            face_swapper.modules.globals.face_swapper_model = "missing_swapper.onnx"
+            face_swapper.modules.globals.face_swapper_model = "inswapper_missing.onnx"
             self.assertIsNone(face_swapper.resolve_face_swapper_model_path())
+
+    def test_unsupported_selected_model_falls_back_to_auto(self):
+        face_swapper = _load_face_swapper([])
+        with tempfile.TemporaryDirectory() as models_dir:
+            open(os.path.join(models_dir, "hyperswap_1c_256.onnx"), "w").close()
+            face_swapper.models_dir = models_dir
+
+            face_swapper.modules.globals.face_swapper_model = "hyperswap_1c_256.onnx"
+
+            self.assertIsNone(face_swapper.resolve_face_swapper_model_path())
+            self.assertIsNone(face_swapper.modules.globals.face_swapper_model)
 
     def test_model_change_invalidates_cache_and_loads_selected_path(self):
         model_loads = []
         face_swapper = _load_face_swapper(model_loads)
         with tempfile.TemporaryDirectory() as models_dir:
-            first_path = os.path.join(models_dir, "first_swapper.onnx")
-            second_path = os.path.join(models_dir, "second_swapper.onnx")
+            first_path = os.path.join(models_dir, "inswapper_first.onnx")
+            second_path = os.path.join(models_dir, "inswapper_second.onnx")
             open(first_path, "w").close()
             open(second_path, "w").close()
             face_swapper.models_dir = models_dir
 
-            face_swapper.set_face_swapper_model("first_swapper.onnx")
+            face_swapper.set_face_swapper_model("inswapper_first.onnx")
             first_model = face_swapper.get_face_swapper()
             self.assertIsNotNone(first_model)
             self.assertEqual([load[0] for load in model_loads], [first_path])
@@ -156,7 +169,7 @@ class FaceSwapperModelSelectionTests(unittest.TestCase):
             self.assertIs(face_swapper.get_face_swapper(), first_model)
             self.assertEqual([load[0] for load in model_loads], [first_path])
 
-            face_swapper.set_face_swapper_model("second_swapper.onnx")
+            face_swapper.set_face_swapper_model("inswapper_second.onnx")
             self.assertIsNone(face_swapper.FACE_SWAPPER)
 
             second_model = face_swapper.get_face_swapper()

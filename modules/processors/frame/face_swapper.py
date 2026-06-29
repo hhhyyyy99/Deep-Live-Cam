@@ -27,6 +27,7 @@ FACE_SWAPPER_MODEL_PATH = None
 THREAD_LOCK = threading.Lock()
 NAME = "DLC.FACE-SWAPPER"
 AUTO_FACE_SWAPPER_MODEL = "Auto"
+SUPPORTED_SWAPPER_MODEL_PREFIXES = ("inswapper",)
 NON_SWAPPER_MODEL_KEYWORDS = (
     "gfpgan",
     "gpen",
@@ -224,7 +225,7 @@ def pre_check() -> bool:
 
 
 def list_face_swapper_models() -> List[str]:
-    """Return local ONNX files except known non-swapper model families."""
+    """Return local ONNX files supported by the current swapper loader."""
     if not os.path.isdir(models_dir):
         return []
 
@@ -235,8 +236,18 @@ def list_face_swapper_models() -> List[str]:
             continue
         if any(keyword in lower_name for keyword in NON_SWAPPER_MODEL_KEYWORDS):
             continue
+        if not is_supported_face_swapper_model(file_name):
+            continue
         models.append(file_name)
     return sorted(models, key=str.lower)
+
+
+def is_supported_face_swapper_model(model_name: str) -> bool:
+    """Return whether a model can be loaded by the current InsightFace path."""
+    lower_name = os.path.basename(model_name).lower()
+    return lower_name.endswith(".onnx") and lower_name.startswith(
+        SUPPORTED_SWAPPER_MODEL_PREFIXES
+    )
 
 
 def normalize_face_swapper_model(model_name: Optional[str]) -> Optional[str]:
@@ -246,6 +257,8 @@ def normalize_face_swapper_model(model_name: Optional[str]) -> Optional[str]:
 
     file_name = os.path.basename(model_name)
     if file_name != model_name or not file_name.lower().endswith(".onnx"):
+        return None
+    if not is_supported_face_swapper_model(file_name):
         return None
     return file_name
 
@@ -278,9 +291,18 @@ def _get_auto_face_swapper_model_path() -> Optional[str]:
 
 
 def resolve_face_swapper_model_path() -> Optional[str]:
-    selected_model = normalize_face_swapper_model(
-        getattr(modules.globals, "face_swapper_model", None)
-    )
+    raw_selected_model = getattr(modules.globals, "face_swapper_model", None)
+    selected_model = normalize_face_swapper_model(raw_selected_model)
+    if (
+        raw_selected_model
+        and raw_selected_model != AUTO_FACE_SWAPPER_MODEL
+        and not selected_model
+    ):
+        update_status(
+            f"Unsupported face swapper model selected: {raw_selected_model}. "
+            "Only INSwapper ONNX models are supported in this build; falling back to Auto.",
+            NAME,
+        )
     modules.globals.face_swapper_model = selected_model
 
     if selected_model:

@@ -32,7 +32,13 @@ Questions to answer:
 
 <!-- Patterns that must always be used -->
 
-(To be filled by the team)
+- Face swapper model discovery must list only model families supported by the
+  current loading path. At the moment the primary swapper path uses
+  `insightface.model_zoo.get_model()`, so selectable primary models must match
+  `inswapper*.onnx`.
+- Persisted model selections from unsupported ONNX families must be normalized
+  back to Auto before loading. Do not repeatedly attempt to load known
+  incompatible files such as `hyperswap_*.onnx` through the InsightFace loader.
 
 ---
 
@@ -40,7 +46,8 @@ Questions to answer:
 
 <!-- What level of testing is expected -->
 
-(To be filled by the team)
+- Model selector tests must cover both discovery filtering and persisted
+  unsupported-model fallback behavior.
 
 ---
 

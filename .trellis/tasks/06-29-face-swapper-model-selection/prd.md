@@ -28,7 +28,10 @@ Allow users to choose the primary face swapper ONNX model from inside the deskto
 - Preserve the current automatic default behavior unless the user chooses a specific model.
 - Discover selectable models by scanning the current contents of the existing `models/` directory.
 - Allow the model selector to refresh from `models/` so files added or removed during a UI session can be reflected without restarting the app.
-- Limit the selection to files that are intended to be compatible primary face swapper ONNX models; face enhancer and detector models must not appear as primary swapper choices.
+- Limit the selection to primary face swapper ONNX models supported by the
+  current loader. In this build that means `inswapper*.onnx`; Hyperswap,
+  face enhancer, detector, recognizer, and other incompatible ONNX files must
+  not appear as selectable primary swappers.
 - Store the selected model in application state so live webcam, window capture, image processing, and video processing use the same selected swapper.
 - Reload the cached face swapper when the selected model changes.
 - Support hot model switching while a live preview is running: the current preview should keep running, the cached swapper should be invalidated, and the next swap should load the newly selected model. A short loading pause is acceptable.
@@ -40,7 +43,7 @@ Allow users to choose the primary face swapper ONNX model from inside the deskto
 
 - [ ] The desktop UI exposes a primary face swapper model selector near existing face processing options.
 - [ ] The selector includes an automatic/default option that preserves the current fp16-then-fp32 preference.
-- [ ] Compatible swapper model files currently present in `models/` are available as selectable choices.
+- [ ] Compatible `inswapper*.onnx` model files currently present in `models/` are available as selectable choices.
 - [ ] The user can refresh the selector so the list matches the current `models/` directory contents.
 - [ ] Choosing a model causes subsequent swap operations to load and use that exact model path.
 - [ ] Changing the selection invalidates the cached `FACE_SWAPPER` instance so the old model is not reused.
@@ -63,3 +66,6 @@ Allow users to choose the primary face swapper ONNX model from inside the deskto
 ## Decisions
 
 - Model changes should hot-apply while a live preview is running. The preview may briefly pause while the newly selected ONNX model loads.
+- Current supported model family is INSwapper only. Persisted selections for
+  unsupported ONNX families should be cleared back to Auto instead of being
+  loaded repeatedly.
