@@ -354,6 +354,7 @@ def save_switch_states():
         "live_mirror": modules.globals.live_mirror,
         "live_resizable": modules.globals.live_resizable,
         "fp_ui": modules.globals.fp_ui,
+        "face_swapper_model": modules.globals.face_swapper_model,
         "show_fps": modules.globals.show_fps,
         "preview_default_width": modules.globals.preview_default_width,
         "preview_default_height": modules.globals.preview_default_height,
@@ -383,6 +384,7 @@ def load_switch_states():
         modules.globals.live_mirror = state.get("live_mirror", False)
         modules.globals.live_resizable = state.get("live_resizable", False)
         modules.globals.fp_ui = state.get("fp_ui", {"face_enhancer": False})
+        modules.globals.face_swapper_model = state.get("face_swapper_model") or None
         modules.globals.show_fps = state.get("show_fps", False)
         modules.globals.preview_default_width = _coerce_preview_dimension(
             state.get("preview_default_width", PREVIEW_DEFAULT_WIDTH),
@@ -668,9 +670,40 @@ class MainWindow(QMainWindow):
         for i, w in enumerate(items):
             grid.addWidget(w, i // 2, i % 2)
 
+        row = len(items) // 2
+
+        # Primary face swapper model dropdown
+        swapper_label = QLabel(_("Face Swapper Model:"))
+        grid.addWidget(swapper_label, row, 0)
+
+        swapper_row = QHBoxLayout()
+        self.cb_face_swapper_model = QComboBox()
+        self._populate_face_swapper_model_choices(
+            getattr(modules.globals, "face_swapper_model", None)
+        )
+        self.cb_face_swapper_model.currentIndexChanged.connect(
+            self._on_face_swapper_model_change
+        )
+        self.cb_face_swapper_model.setToolTip(
+            _("Select the primary face swapper ONNX model (Auto preserves the default preference)")
+        )
+        swapper_row.addWidget(self.cb_face_swapper_model, 1)
+
+        self.btn_refresh_face_swapper_models = QPushButton(_("Refresh"))
+        self.btn_refresh_face_swapper_models.setObjectName("secondary")
+        self.btn_refresh_face_swapper_models.setToolTip(
+            _("Rescan the models folder for ONNX models")
+        )
+        self.btn_refresh_face_swapper_models.clicked.connect(
+            self._on_refresh_face_swapper_models
+        )
+        swapper_row.addWidget(self.btn_refresh_face_swapper_models)
+        grid.addLayout(swapper_row, row, 1)
+        row += 1
+
         # Face enhancer dropdown
         enhancer_label = QLabel(_("Face Enhancer:"))
-        grid.addWidget(enhancer_label, len(items) // 2, 0)
+        grid.addWidget(enhancer_label, row, 0)
 
         self.cb_enhancer = QComboBox()
         self.cb_enhancer.addItems(["None", "GFPGAN", "GPEN-512", "GPEN-256"])
@@ -684,7 +717,7 @@ class MainWindow(QMainWindow):
         self.cb_enhancer.setCurrentText(initial)
         self.cb_enhancer.currentTextChanged.connect(self._on_enhancer_change)
         self.cb_enhancer.setToolTip(_("Select a face enhancement model (None = no enhancement)"))
-        grid.addWidget(self.cb_enhancer, len(items) // 2, 1)
+        grid.addWidget(self.cb_enhancer, row, 1)
 
         return card
 
@@ -929,6 +962,48 @@ class MainWindow(QMainWindow):
         if selected:
             _update_tumbler(selected, True)
         save_switch_states()
+
+    def _populate_face_swapper_model_choices(self, selected_model: Optional[str]) -> None:
+        from modules.processors.frame.face_swapper import (
+            AUTO_FACE_SWAPPER_MODEL,
+            list_face_swapper_models,
+            normalize_face_swapper_model,
+        )
+
+        selected_model = normalize_face_swapper_model(selected_model)
+        modules.globals.face_swapper_model = selected_model
+
+        self.cb_face_swapper_model.blockSignals(True)
+        try:
+            self.cb_face_swapper_model.clear()
+            self.cb_face_swapper_model.addItem(_(AUTO_FACE_SWAPPER_MODEL), None)
+            available_models = list_face_swapper_models()
+            for model_name in available_models:
+                self.cb_face_swapper_model.addItem(model_name, model_name)
+            if selected_model and selected_model not in available_models:
+                self.cb_face_swapper_model.addItem(f"{selected_model} (missing)", selected_model)
+            if selected_model:
+                for index in range(self.cb_face_swapper_model.count()):
+                    if self.cb_face_swapper_model.itemData(index) == selected_model:
+                        self.cb_face_swapper_model.setCurrentIndex(index)
+                        break
+        finally:
+            self.cb_face_swapper_model.blockSignals(False)
+
+    def _on_face_swapper_model_change(self, _index: int) -> None:
+        model_name = self.cb_face_swapper_model.currentData()
+        from modules.processors.frame.face_swapper import set_face_swapper_model
+        set_face_swapper_model(model_name)
+        save_switch_states()
+        if model_name:
+            update_status(f"Face swapper model selected: {model_name}")
+        else:
+            update_status("Face swapper model selection set to Auto.")
+
+    def _on_refresh_face_swapper_models(self) -> None:
+        selected_model = self.cb_face_swapper_model.currentData()
+        self._populate_face_swapper_model_choices(selected_model)
+        update_status("Face swapper model list refreshed from models folder.")
 
     def _on_preview_size_changed(self) -> None:
         modules.globals.preview_default_width = self.spin_preview_width.value()

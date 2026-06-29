@@ -23,8 +23,22 @@ from collections import deque
 import time
 
 FACE_SWAPPER = None
+FACE_SWAPPER_MODEL_PATH = None
 THREAD_LOCK = threading.Lock()
 NAME = "DLC.FACE-SWAPPER"
+AUTO_FACE_SWAPPER_MODEL = "Auto"
+NON_SWAPPER_MODEL_KEYWORDS = (
+    "gfpgan",
+    "gpen",
+    "det",
+    "detection",
+    "landmark",
+    "recognition",
+    "arcface",
+    "genderage",
+    "buffalo",
+    "scrfd",
+)
 
 # --- START: Added for Interpolation ---
 PREVIOUS_FRAME_RESULT = None # Stores the final processed frame from the previous step
@@ -209,12 +223,86 @@ def pre_check() -> bool:
     return True
 
 
-def pre_start() -> bool:
-    # Check for either model variant
-    fp16_path = os.path.join(models_dir, "inswapper_128_fp16.onnx")
+def list_face_swapper_models() -> List[str]:
+    """Return local ONNX files except known non-swapper model families."""
+    if not os.path.isdir(models_dir):
+        return []
+
+    models = []
+    for file_name in os.listdir(models_dir):
+        lower_name = file_name.lower()
+        if not lower_name.endswith(".onnx"):
+            continue
+        if any(keyword in lower_name for keyword in NON_SWAPPER_MODEL_KEYWORDS):
+            continue
+        models.append(file_name)
+    return sorted(models, key=str.lower)
+
+
+def normalize_face_swapper_model(model_name: Optional[str]) -> Optional[str]:
+    """Normalize persisted/UI model values to a safe model file name."""
+    if not model_name or model_name == AUTO_FACE_SWAPPER_MODEL:
+        return None
+
+    file_name = os.path.basename(model_name)
+    if file_name != model_name or not file_name.lower().endswith(".onnx"):
+        return None
+    return file_name
+
+
+def set_face_swapper_model(model_name: Optional[str]) -> None:
+    """Set the selected swapper model and invalidate any loaded model."""
+    global FACE_SWAPPER, FACE_SWAPPER_MODEL_PATH
+
+    normalized = normalize_face_swapper_model(model_name)
+    with THREAD_LOCK:
+        if modules.globals.face_swapper_model == normalized:
+            return
+        modules.globals.face_swapper_model = normalized
+        FACE_SWAPPER = None
+        FACE_SWAPPER_MODEL_PATH = None
+        _reset_cuda_graph_session()
+
+
+def _get_auto_face_swapper_model_path() -> Optional[str]:
+    # Prefer FP16 on GPUs with Tensor Cores (Turing+) — half the
+    # memory bandwidth, faster inference.  Fall back to FP32 for
+    # older GPUs (e.g. GTX 16xx) where FP16 can produce NaN.
     fp32_path = os.path.join(models_dir, "inswapper_128.onnx")
-    if not os.path.exists(fp16_path) and not os.path.exists(fp32_path):
-        update_status(f"Model not found in {models_dir}. Please download inswapper_128.onnx.", NAME)
+    fp16_path = os.path.join(models_dir, "inswapper_128_fp16.onnx")
+    if _HAS_TORCH_CUDA and os.path.exists(fp16_path):
+        return fp16_path
+    if os.path.exists(fp32_path):
+        return fp32_path
+    return None
+
+
+def resolve_face_swapper_model_path() -> Optional[str]:
+    selected_model = normalize_face_swapper_model(
+        getattr(modules.globals, "face_swapper_model", None)
+    )
+    modules.globals.face_swapper_model = selected_model
+
+    if selected_model:
+        model_path = os.path.join(models_dir, selected_model)
+        if os.path.exists(model_path):
+            return model_path
+        update_status(f"Selected face swapper model not found: {model_path}", NAME)
+        return None
+
+    model_path = _get_auto_face_swapper_model_path()
+    if model_path is None:
+        update_status(f"No inswapper model found in {models_dir}.", NAME)
+    return model_path
+
+
+def pre_start() -> bool:
+    selected_model = normalize_face_swapper_model(
+        getattr(modules.globals, "face_swapper_model", None)
+    )
+    if resolve_face_swapper_model_path() is None:
+        if not selected_model:
+            update_status(f"Model not found in {models_dir}. Please download inswapper_128.onnx.", NAME)
         return False
 
     # Try to get the face swapper to ensure it loads correctly
@@ -226,23 +314,18 @@ def pre_start() -> bool:
 
 
 def get_face_swapper() -> Any:
-    global FACE_SWAPPER
+    global FACE_SWAPPER, FACE_SWAPPER_MODEL_PATH
 
     with THREAD_LOCK:
-        if FACE_SWAPPER is None:
-            # Prefer FP16 on GPUs with Tensor Cores (Turing+) — half the
-            # memory bandwidth, faster inference.  Fall back to FP32 for
-            # older GPUs (e.g. GTX 16xx) where FP16 can produce NaN.
-            fp32_path = os.path.join(models_dir, "inswapper_128.onnx")
-            fp16_path = os.path.join(models_dir, "inswapper_128_fp16.onnx")
-            use_fp16 = _HAS_TORCH_CUDA and os.path.exists(fp16_path)
-            if use_fp16:
-                model_path = fp16_path
-            elif os.path.exists(fp32_path):
-                model_path = fp32_path
-            else:
-                update_status(f"No inswapper model found in {models_dir}.", NAME)
-                return None
+        model_path = resolve_face_swapper_model_path()
+        if model_path is None:
+            return None
+
+        if FACE_SWAPPER is None or FACE_SWAPPER_MODEL_PATH != model_path:
+            FACE_SWAPPER = None
+            FACE_SWAPPER_MODEL_PATH = None
+            _reset_cuda_graph_session()
+
             # On Apple Silicon, rewrite Pad(reflect) → Slice+Concat so
             # CoreML can run the entire model in a single partition on
             # the Neural Engine instead of bouncing between CPU and ANE.
@@ -276,6 +359,7 @@ def get_face_swapper() -> Any:
                     model_path,
                     providers=providers_config,
                 )
+                FACE_SWAPPER_MODEL_PATH = model_path
                 # Set up CUDA graph session for faster inference
                 if _HAS_TORCH_CUDA and any(
                     p == "CUDAExecutionProvider" or
@@ -287,6 +371,7 @@ def get_face_swapper() -> Any:
             except Exception as e:
                 update_status(f"Error loading face swapper model: {e}", NAME)
                 FACE_SWAPPER = None
+                FACE_SWAPPER_MODEL_PATH = None
                 return None
     return FACE_SWAPPER
 
@@ -343,6 +428,15 @@ _cuda_graph_session = {
 # shared across threads and run_with_iobinding mutates GPU-side buffers;
 # concurrent calls would produce wrong output.
 _cuda_graph_lock = threading.Lock()
+
+
+def _reset_cuda_graph_session() -> None:
+    with _cuda_graph_lock:
+        _cuda_graph_session['session'] = None
+        _cuda_graph_session['io_binding'] = None
+        _cuda_graph_session['ort_input'] = None
+        _cuda_graph_session['ort_latent'] = None
+        _cuda_graph_session['recorded'] = False
 
 
 class _CudaGraphSessionAdapter:
