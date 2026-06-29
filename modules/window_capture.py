@@ -138,14 +138,18 @@ class WindowCapturer:
                     (0, 0), (w, h), mfc_dc, (0, 0), win32con.SRCCOPY,
                 )
 
-            bmp_bits = bitmap.GetBitmapBits(False)
+            bmp_bits = bitmap.GetBitmapBits(True)
             stride = w * 4
             expected_size = stride * h
             if len(bmp_bits) < expected_size:
                 self._set_error(f"Bitmap too small: {len(bmp_bits)} < {expected_size}")
                 return self._return_last()
 
-            frame = np.frombuffer(bmp_bits, dtype=np.uint8)[:expected_size].reshape((h, w, 4))
+            if isinstance(bmp_bits, (tuple, list)):
+                frame_data = np.asarray(bmp_bits, dtype=np.uint8)
+            else:
+                frame_data = np.frombuffer(bmp_bits, dtype=np.uint8)
+            frame = frame_data[:expected_size].reshape((h, w, 4))
             bgr = frame[:, :, :3].copy()
 
             self._last_frame = bgr
