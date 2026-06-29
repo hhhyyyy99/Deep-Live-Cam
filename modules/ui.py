@@ -536,7 +536,18 @@ class MainWindow(QMainWindow):
 
         root = QWidget()
         self.setCentralWidget(root)
-        layout = QVBoxLayout(root)
+        root_layout = QVBoxLayout(root)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        root_layout.addWidget(scroll)
+
+        content = QWidget()
+        scroll.setWidget(content)
+
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
 
@@ -660,7 +671,7 @@ class MainWindow(QMainWindow):
                                     _("Manually assign which source face maps to which target face"))
         self.sw_map_faces.toggled.connect(self._on_map_faces_toggled)
 
-        # Layout: 2 columns of switches
+        # Keep switches in one readable column; the main window scrolls if needed.
         items = [
             self.sw_keep_fps, self.sw_keep_audio,
             self.sw_keep_frames, self.sw_many_faces,
@@ -668,9 +679,9 @@ class MainWindow(QMainWindow):
             self.sw_poisson, self.sw_color_fix,
         ]
         for i, w in enumerate(items):
-            grid.addWidget(w, i // 2, i % 2)
+            grid.addWidget(w, i, 0, 1, 2)
 
-        row = len(items) // 2
+        row = len(items)
 
         # Primary face swapper model dropdown
         swapper_label = QLabel(_("Face Swapper Model:"))
