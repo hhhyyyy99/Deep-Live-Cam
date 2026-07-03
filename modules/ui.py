@@ -1300,6 +1300,9 @@ class _CaptureWorker(QThread):
         while not self._stop.is_set():
             ret, frame = self._cap.read()
             if not ret:
+                if getattr(self._cap, "transient_no_frame", False):
+                    read_failures = 0
+                    continue
                 read_failures += 1
                 if read_failures >= self._max_read_failures:
                     detail = getattr(self._cap, "last_error", "") or "No frames received."
@@ -1325,12 +1328,20 @@ class _CaptureWorker(QThread):
 class _ProcessingWorker(QThread):
     """Pulls raw frames, runs detect/swap/enhance, pushes processed frames."""
 
-    def __init__(self, capture_queue, processed_queue, stop_event, camera_fps: float):
+    def __init__(
+        self,
+        capture_queue,
+        processed_queue,
+        stop_event,
+        camera_fps: float,
+        capture_fps_getter: Optional[Callable[[], float]] = None,
+    ):
         super().__init__()
         self._cq = capture_queue
         self._pq = processed_queue
         self._stop = stop_event
         self._fps = camera_fps
+        self._capture_fps_getter = capture_fps_getter
 
     def run(self) -> None:
         frame_processors = get_frame_processors_modules(modules.globals.frame_processors)
@@ -1442,10 +1453,21 @@ class _ProcessingWorker(QThread):
                 prev_time = current_time
 
             if modules.globals.show_fps:
+                capture_fps = 0.0
+                if self._capture_fps_getter is not None:
+                    try:
+                        capture_fps = float(self._capture_fps_getter() or 0.0)
+                    except Exception:
+                        capture_fps = 0.0
                 cv2.putText(
-                    temp_frame, f"FPS: {fps:.1f}", (10, 30),
+                    temp_frame, f"PROC FPS: {fps:.1f}", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2,
                 )
+                if capture_fps > 0:
+                    cv2.putText(
+                        temp_frame, f"CAP FPS: {capture_fps:.1f}", (10, 65),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2,
+                    )
 
             try:
                 self._pq.put_nowait(temp_frame)
@@ -1494,9 +1516,11 @@ class WebcamPreviewWindow(QWidget):
                 return
 
         camera_fps = self._cap.actual_fps
+        capture_backend = getattr(self._cap, "capture_backend", "camera")
         print(
-            f"[webcam] Camera running at {self._cap.actual_width}x"
-            f"{self._cap.actual_height}@{camera_fps:.0f}fps"
+            f"[live] Capture running backend={capture_backend} "
+            f"size={self._cap.actual_width}x{self._cap.actual_height} "
+            f"source_fps={camera_fps:.0f}"
         )
 
         self._capture_queue: queue.Queue = queue.Queue(maxsize=2)
@@ -1507,7 +1531,17 @@ class WebcamPreviewWindow(QWidget):
             self._cap, self._capture_queue, self._stop_event
         )
         self._processing_worker = _ProcessingWorker(
-            self._capture_queue, self._processed_queue, self._stop_event, camera_fps
+            self._capture_queue,
+            self._processed_queue,
+            self._stop_event,
+            camera_fps,
+            lambda: float(
+                getattr(
+                    self._cap,
+                    "capture_fps",
+                    getattr(self._cap, "actual_fps", 0.0),
+                ) or 0.0
+            ),
         )
         self._capture_worker.start()
         self._processing_worker.start()
@@ -1578,7 +1612,16 @@ def _open_window_preview(hwnd: int) -> None:
     _WEBCAM_PREVIEW.show()
     _WEBCAM_PREVIEW.raise_()
     _WEBCAM_PREVIEW.activateWindow()
-    print(f"[window] Preview window shown ({capturer.actual_width}x{capturer.actual_height})", flush=True)
+    backend = getattr(capturer, "capture_backend", "window")
+    update_status(
+        f"Window capture started ({backend}, "
+        f"{capturer.actual_width}x{capturer.actual_height})"
+    )
+    print(
+        f"[window] Preview window shown backend={backend} "
+        f"size={capturer.actual_width}x{capturer.actual_height}",
+        flush=True,
+    )
 
 
 # ─── mapper dialogs (image/video + live) ────────────────────────────────
